@@ -64,3 +64,5 @@ __pycache__/
 .claude/skills/*
 !.claude/skills/code-audit/
 !.claude/settings.json
+# The PSP test and profiling builds (BUILD_DIR=...)
+build-*/

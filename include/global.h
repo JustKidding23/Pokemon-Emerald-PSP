@@ -30,7 +30,12 @@
 
 // to help in decompiling
 #define asm_unified(x) asm(".syntax unified\n" x "\n.syntax divided")
+#if defined(PORTABLE) && defined(__mips__)
+// GCC has no naked functions on MIPS, and the PC builds' are empty anyway
+#define NAKED
+#else
 #define NAKED __attribute__((naked))
+#endif
 
 #if MODERN
 #define asm __asm__

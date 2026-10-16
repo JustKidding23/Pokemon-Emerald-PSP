@@ -11,7 +11,7 @@ TARGET_OS       ?= NONE
 
 # `File name`.gba ('_modern' will be appended to the modern builds)
 FILE_NAME := pokeemerald
-BUILD_DIR := build
+BUILD_DIR ?= build
 
 # Builds the ROM using a modern compiler
 MODERN      ?= 0
@@ -39,6 +39,11 @@ endif
 ifeq (ps2,$(MAKECMDGOALS))
   PORTABLE := 1
   TARGET_OS := PS2
+  override IS64BIT := 0
+endif
+ifeq (psp,$(MAKECMDGOALS))
+  PORTABLE := 1
+  TARGET_OS := PSP
   override IS64BIT := 0
 endif
 
@@ -103,6 +108,9 @@ ifeq ($(PORTABLE),1)
   else ifeq ($(TARGET_OS),PS2)
     PORTABLE_DIR_PREFIX := ps2
     PREFIX := mips64r5900el-ps2-elf-
+  else ifeq ($(TARGET_OS),PSP)
+    PORTABLE_DIR_PREFIX := psp
+    PREFIX := psp-
   else # LINUX
     PREFIX :=
   endif # TARGET_OS
@@ -171,7 +179,7 @@ ifeq ($(PORTABLE),1)
     PS2SDK ?= /usr/local/ps2dev/ps2sdk
     EE_ARCH := -march=r5900 -mhard-float -msingle-float -mno-shared -G0
     OS_CFLAGS := $(EE_ARCH) -mno-llsc -mplt -D_EE
-    PS2_ASFLAGS := -EL -mabi=n32 $(EE_ARCH) -call_nonpic
+    CONSOLE_ASFLAGS := -EL -mabi=n32 $(EE_ARCH) -call_nonpic
     # SDL_main.h renames main to SDL_main on __PS2__, which gcc doesn't define.
     # SDL2main's main resets the IOP and loads the drivers first.
     PLATFORM_INCLUDES += -D_EE -D__PS2__ -I$(PS2SDK)/ee/include -I$(PS2SDK)/common/include -I$(PS2SDK)/ports/include -I$(PS2DEV)/gsKit/include
@@ -179,6 +187,22 @@ ifeq ($(PORTABLE),1)
     BUILD_FEXTENSION := .elf
     # MIPS as pads .int and .short to their size, which would move the
     # unaligned values in the scripts. The data uses .4byte and .2byte.
+    ASM_PSEUDO_OP_CONV := cat
+  else ifeq ($(TARGET_OS),PSP)
+    # Like on the PS2, cc1 and as get what psp-gcc would pass them. -G0 keeps
+    # small variables out of .sbss, so that gba_ram holds them all.
+    PSPDEV ?= $(HOME)/pspdev
+    PSPSDK ?= $(PSPDEV)/psp/sdk
+    export PATH := $(PSPDEV)/bin:$(PATH)
+    OS_CFLAGS := -march=allegrex -mhard-float -msingle-float -G0
+    CONSOLE_ASFLAGS := -EL -mabi=eabi -march=allegrex -mhard-float -msingle-float
+    PLATFORM_INCLUDES += -D__PSP__ -DPSP -D_PSP_FW_VERSION=600 -I$(PSPSDK)/include
+    BUILD_FEXTENSION := .elf
+    # PSP_TEST=1 builds the emulator tests' version (see TestButtons in psp.c)
+    ifeq ($(PSP_TEST),1)
+      PLATFORM_INCLUDES += -DPSP_TEST
+    endif
+    # MIPS as pads .int and .short to their size, see the PS2
     ASM_PSEUDO_OP_CONV := cat
   else ifeq ($(IS64BIT),1)
     # Build position independent, so nothing can rely on addresses fitting in 32 bits
@@ -209,6 +233,10 @@ ifeq ($(PORTABLE),1)
     PLATFORM_LFLAGS += -L$(SDL_PREFIX)/lib -lSDL2 -lm
   else ifeq ($(TARGET_OS),PS2)
     PLATFORM_LFLAGS += -lSDL2main -lSDL2 -lm -lpatches -lgskit -ldmakit -lps2_drivers
+  else ifeq ($(TARGET_OS),PSP)
+    # The PSP doesn't use SDL: src/platform/psp*.c talk to the system directly.
+    # psp-gcc adds libc, the RTC and the kernel libraries after these.
+    PLATFORM_LFLAGS += -L$(PSPSDK)/lib -lpspdebug -lpspgu -lpspge -lpspdisplay -lpspctrl -lpspaudio -lpsppower
   else
     PLATFORM_LFLAGS += -lSDL2main -lSDL2 -lm
   endif
@@ -282,7 +310,7 @@ SHELL := bash -o pipefail
 
 # Set flags for tools
 ifeq ($(PORTABLE),1)
-  ASFLAGS := $(if $(PS2_ASFLAGS),$(PS2_ASFLAGS),--$(BIT_WIDTH)) $(ASFLAGS64) --defsym VER_64BIT=$(IS64BIT) --defsym MODERN=$(MODERN) --defsym PORTABLE=1 --defsym UBFIX=1
+  ASFLAGS := $(if $(CONSOLE_ASFLAGS),$(CONSOLE_ASFLAGS),--$(BIT_WIDTH)) $(ASFLAGS64) --defsym VER_64BIT=$(IS64BIT) --defsym MODERN=$(MODERN) --defsym PORTABLE=1 --defsym UBFIX=1
   ifeq ($(TARGET_OS),MACOS)
     # x86_64-elf-as takes / as the start of a comment, like SVR4, which would
     # quietly cut short the songs' expressions. The Linux one doesn't.
@@ -316,11 +344,11 @@ else ifeq ($(PORTABLE),1)
     CC1 :=
   else
     MODERNCC := $(PREFIX)gcc
-    CPP := $(PREFIX)cpp $(if $(PS2_ASFLAGS),,-m$(BIT_WIDTH))
+    CPP := $(PREFIX)cpp $(if $(CONSOLE_ASFLAGS),,-m$(BIT_WIDTH))
     CC1 	:= $(shell $(PREFIX)gcc --print-prog-name=cc1) -quiet
   endif
   PATH_MODERNCC := PATH="$(PATH)" $(MODERNCC)
-  override CFLAGS += $(OS_CFLAGS) $(PLATFORM_CFLAGS) -Werror=implicit-function-declaration -Werror=incompatible-pointer-types -Werror=int-conversion -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast -Wno-trigraphs -Wimplicit -Wparentheses -Wunused $(if $(PS2_ASFLAGS),,-m$(BIT_WIDTH)) -std=gnu99 $(LEADING_UNDERSCORE_FLAG) -fno-common -fno-builtin -Wno-unused-function -DPORTABLE -DNONMATCHING -D UBFIX -DMODERN=$(MODERN)
+  override CFLAGS += $(OS_CFLAGS) $(PLATFORM_CFLAGS) -Werror=implicit-function-declaration -Werror=incompatible-pointer-types -Werror=int-conversion -Werror=pointer-to-int-cast -Werror=int-to-pointer-cast -Wno-trigraphs -Wimplicit -Wparentheses -Wunused $(if $(CONSOLE_ASFLAGS),,-m$(BIT_WIDTH)) -std=gnu99 $(LEADING_UNDERSCORE_FLAG) -fno-common -fno-builtin -Wno-unused-function -DPORTABLE -DNONMATCHING -D UBFIX -DMODERN=$(MODERN)
   # The same floating point results everywhere, which the tests' frame hashes
   # need: on ARM, compilers would otherwise fuse multiplies and adds
   override CFLAGS += -ffp-contract=off
@@ -402,7 +430,7 @@ MAKEFLAGS += --no-print-directory
 .DELETE_ON_ERROR:
 
 RULES_NO_SCAN += libagbsyscall clean clean-assets tidy tidymodern tidynonmodern generated clean-generated
-.PHONY: all rom modern compare winwsl linux macos ps2
+.PHONY: all rom modern compare winwsl linux macos ps2 psp
 .PHONY: $(RULES_NO_SCAN)
 
 infoshell = $(foreach line, $(shell $1 | sed "s/ /__SPACE__/g"), $(info $(subst __SPACE__, ,$(line))))
@@ -438,6 +466,10 @@ endif
 # Collect sources
 C_SRCS_IN := $(wildcard $(C_SUBDIR)/*.c $(C_SUBDIR)/*/*.c $(C_SUBDIR)/*/*/*.c)
 C_SRCS := $(foreach src,$(C_SRCS_IN),$(if $(findstring .inc.c,$(src)),,$(src)))
+ifeq ($(TARGET_OS),PSP)
+  # The SDL backend and its settings file, which psp.c takes the place of
+  C_SRCS := $(filter-out $(C_SUBDIR)/platform/sdl2.c $(C_SUBDIR)/platform/settings.c,$(C_SRCS))
+endif
 C_OBJS := $(patsubst $(C_SUBDIR)/%.c,$(C_BUILDDIR)/%.o,$(C_SRCS))
 
 C_ASM_SRCS := $(wildcard $(C_SUBDIR)/*.s $(C_SUBDIR)/*/*.s $(C_SUBDIR)/*/*/*.s)
@@ -484,6 +516,7 @@ winwsl: all
 linux: all
 macos: all
 ps2: all
+psp: all
 
 # Other rules
 rom: $(ROM)
@@ -697,6 +730,17 @@ else ifeq ($(TARGET_OS),MACOS)
 # without chained fixups (see -no_fixup_chains)
 $(ROM): $(OBJS)
 	$(MODERNCC) $(CFLAGS) $^ $(PLATFORM_LFLAGS) $(OS_LFLAGS) -o $@ 2>&1 | sed '/ld: warning: pointer not aligned/d'
+else ifeq ($(TARGET_OS),PSP)
+# EBOOT.PBP, in build/psp32/PSP/GAME/EMERALD_PSP/ with the files that go next to it
+PSP_TITLE ?= Pokemon Emerald PSP
+PSP_GAME_DIR := $(OBJ_DIR)/PSP/GAME/EMERALD_PSP
+$(ROM): $(OBJS)
+	$(MODERNCC) $(CFLAGS) -Wl,--demangle $^ $(PLATFORM_LFLAGS) $(OS_LFLAGS) -Wl,-zmax-page-size=128 -o $@
+	psp-fixup-imports $@
+	@mkdir -p $(PSP_GAME_DIR)
+	psp-strip $@ -o $(OBJ_DIR)/pokeemerald_strip.elf
+	mksfoex -d MEMSIZE=1 '$(PSP_TITLE)' $(OBJ_DIR)/PARAM.SFO
+	pack-pbp $(PSP_GAME_DIR)/EBOOT.PBP $(OBJ_DIR)/PARAM.SFO $(or $(wildcard psp/ICON0.PNG),NULL) NULL NULL $(or $(wildcard psp/PIC1.PNG),NULL) NULL $(OBJ_DIR)/pokeemerald_strip.elf NULL
 else
 $(ROM): $(OBJS)
 	$(MODERNCC) $(CFLAGS) -Wl,--demangle $^ -static-libgcc -L$(SDL_DIR)/lib $(PLATFORM_LFLAGS) $(OS_LFLAGS) -o $@
