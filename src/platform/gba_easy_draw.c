@@ -28,9 +28,15 @@
 
 extern void (*const gIntrTable[])(void);
 
+uint16_t *memsetu16(uint16_t *dst, uint16_t fill, size_t count);
+
 struct scanlineData {
+    // Only the enabled backgrounds' layers are drawn, and read, each line
     uint16_t layers[4][DISPLAY_WIDTH];
+    // Clear at the start of each line: DrawScanline clears the ones that
+    // spritePriorities says were drawn on
     uint16_t spriteLayers[4][DISPLAY_WIDTH];
+    uint8_t spritePriorities;
     uint16_t bgcnts[4];
     uint16_t winMask[DISPLAY_WIDTH];
     //priority bookkeeping
@@ -52,6 +58,96 @@ static const uint16_t bgMapSizes[][2] =
     {64, 64},
 };
 
+// A 4bpp tile row's 8 pixels in the opposite order, for a flipped tile
+static inline uint32_t FlipTileRow4(uint32_t row)
+{
+    row = ((row & 0x0F0F0F0F) << 4) | ((row >> 4) & 0x0F0F0F0F);
+    row = ((row & 0x00FF00FF) << 8) | ((row >> 8) & 0x00FF00FF);
+    return (row << 16) | (row >> 16);
+}
+
+// Whether RenderBGScanlineDirect can draw a background: a 4bpp text one without
+// horizontal mosaic
+static bool CanDrawBGDirectly(uint16_t control)
+{
+    return !(control & BGCNT_256COLOR) && (!(control & BGCNT_MOSAIC) || mosaicBGEffectX == 0);
+}
+
+// Draws a background's opaque pixels straight onto the line, where winMask
+// (if not NULL) has the background's bit. That's what RenderBGScanline and
+// copying its layer onto the line do, for a background that isn't blended.
+static void RenderBGScanlineDirect(int bgNum, uint16_t control, uint16_t hoffs, uint16_t voffs, int lineNum, uint16_t *line, const uint16_t *winMask)
+{
+    unsigned int charBaseBlock = (control >> 2) & 3;
+    unsigned int screenBaseBlock = (control >> 8) & 0x1F;
+    unsigned int mapWidthInPixels = bgMapSizes[control >> 14][0] * 8;
+    unsigned int mapHeightInPixels = bgMapSizes[control >> 14][1] * 8;
+    uint8_t *bgtiles = (uint8_t *)BG_CHAR_ADDR(charBaseBlock);
+    uint16_t *pal = (uint16_t *)PLTT;
+    uint16_t *bgmapRow = (uint16_t *)BG_SCREEN_ADDR(screenBaseBlock);
+    uint16_t bgBit = 1 << bgNum;
+    unsigned int yy;
+
+    if (control & BGCNT_MOSAIC)
+        lineNum = applyBGVerticalMosaicEffect(lineNum);
+    hoffs &= 0x1FF;
+    voffs &= 0x1FF;
+
+    yy = (lineNum + voffs) & 0x1FF;
+    if (yy > 255 && mapHeightInPixels > 256)
+        bgmapRow += (mapWidthInPixels > 256) ? 0x800 : 0x400;
+    yy &= 0xFF;
+    bgmapRow += (yy / 8) * 32;
+
+    for (unsigned int x = 0; x < DISPLAY_WIDTH;)
+    {
+        unsigned int xx = (x + hoffs) & 0x1FF;
+        uint16_t *bgmap = bgmapRow;
+
+        if (xx > 255 && mapWidthInPixels > 256)
+            bgmap += 0x400;
+        xx &= 0xFF;
+
+        uint16_t entry = bgmap[xx / 8];
+        unsigned int tileY = (entry & (1 << 11)) ? 7 - (yy % 8) : yy % 8;
+        uint32_t pixels = *(uint32_t *)(bgtiles + (uint16_t)((entry & 0x3FF) * 32) + tileY * 4);
+        unsigned int tileX = xx % 8;
+        unsigned int run = 8 - tileX;
+
+        if (run > DISPLAY_WIDTH - x)
+            run = DISPLAY_WIDTH - x;
+        if (pixels == 0)
+        {
+            x += run;
+            continue;
+        }
+        if (entry & (1 << 10))
+            pixels = FlipTileRow4(pixels);
+        pixels >>= tileX * 4;
+
+        const uint16_t *subPal = pal + 16 * ((entry >> 12) & 0xF);
+        unsigned int end = x + run;
+
+        if (winMask == NULL)
+        {
+            for (; x < end; x++, pixels >>= 4)
+            {
+                if (pixels & 0xF)
+                    line[x] = subPal[pixels & 0xF] | 0x8000;
+            }
+        }
+        else
+        {
+            for (; x < end; x++, pixels >>= 4)
+            {
+                if ((pixels & 0xF) && (winMask[x] & bgBit))
+                    line[x] = subPal[pixels & 0xF] | 0x8000;
+            }
+        }
+    }
+}
+
+// Writes every pixel of the line, 0 where the layer is clear
 static void RenderBGScanline(int bgNum, uint16_t control, uint16_t hoffs, uint16_t voffs, int lineNum, uint16_t *line)
 {
     unsigned int charBaseBlock = (control >> 2) & 3;
@@ -71,9 +167,11 @@ static void RenderBGScanline(int bgNum, uint16_t control, uint16_t hoffs, uint16
     hoffs &= 0x1FF;
     voffs &= 0x1FF;
 
-    // Without mosaic, whole runs of pixels come from the same map entry, so it
-    // only needs looking up once per tile instead of for every pixel
-    if (!(control & BGCNT_MOSAIC))
+    // Without horizontal mosaic, whole runs of pixels come from the same map
+    // entry, so it only needs looking up once per tile instead of for every
+    // pixel. The overworld keeps mosaic on for BG1-3 with a size of 0, which
+    // changes nothing.
+    if (!(control & BGCNT_MOSAIC) || mosaicBGEffectX == 0)
     {
         unsigned int yy = (lineNum + voffs) & 0x1FF;
         uint16_t *bgmapRow = (uint16_t *)BG_SCREEN_ADDR(screenBaseBlock);
@@ -109,16 +207,17 @@ static void RenderBGScanline(int bgNum, uint16_t control, uint16_t hoffs, uint16
 
                 if (pixels == 0)
                 {
+                    memset(&line[x], 0, run * sizeof(line[0]));
                     x += run;
                     continue;
                 }
+                if (flipX)
+                    pixels = FlipTileRow4(pixels);
                 for (unsigned int tileX = xx % 8, end = tileX + run; tileX < end; tileX++, x++)
                 {
-                    unsigned int px = flipX ? 7 - tileX : tileX;
-                    uint8_t pixel = (pixels >> (px * 4)) & 0xF;
+                    uint8_t pixel = (pixels >> (tileX * 4)) & 0xF;
 
-                    if (pixel != 0)
-                        line[x] = subPal[pixel] | 0x8000;
+                    line[x] = pixel != 0 ? (subPal[pixel] | 0x8000) : 0;
                 }
             }
             else
@@ -130,6 +229,8 @@ static void RenderBGScanline(int bgNum, uint16_t control, uint16_t hoffs, uint16
         return;
     }
 
+    // This way only draws the pixels that aren't clear
+    memset(line, 0, DISPLAY_WIDTH * sizeof(line[0]));
     for (unsigned int x = 0; x < DISPLAY_WIDTH; x++)
     {
         uint16_t *bgmap = (uint16_t *)BG_SCREEN_ADDR(screenBaseBlock);
@@ -316,6 +417,7 @@ static void RenderRotScaleBGScanline(int bgNum, uint16_t control, uint16_t x, ui
     int realX = currentX;
     int realY = currentY;
 
+    memset(line, 0, DISPLAY_WIDTH * sizeof(line[0]));
     if (bgcnt->areaOverflowMode)
     {
         for (int x = 0; x < DISPLAY_WIDTH; x++)
@@ -481,41 +583,65 @@ static bool alphaBlendSelectTargetB(struct scanlineData* scanline, uint16_t* col
     }
 }
 
-//checks if window horizontal is in bounds and takes account WIN wraparound
-static bool winCheckHorizontalBounds(u16 left, u16 right, u16 xpos)
+//fills the pixels a window covers horizontally, taking account of WIN wraparound
+static void FillWindowSpan(uint16_t *mask, u16 left, u16 right, uint16_t value)
 {
+    unsigned int x;
+
     if (left > right)
-        return (xpos >= left || xpos < right);
+    {
+        for (x = 0; x < right && x < DISPLAY_WIDTH; x++)
+            mask[x] = value;
+        for (x = left; x < DISPLAY_WIDTH; x++)
+            mask[x] = value;
+    }
     else
-        return (xpos >= left && xpos < right);
+    {
+        for (x = left; x < right && x < DISPLAY_WIDTH; x++)
+            mask[x] = value;
+    }
 }
 
-// Parts of this code heavily borrowed from NanoboyAdvance.
-static void DrawSprites(struct scanlineData* scanline, uint16_t vcount, bool windowsEnabled)
+// The sprites in OAM, decoded. OAM doesn't change while a frame is drawn, so
+// this is only done again when it does.
+struct DecodedSprite
+{
+    struct OamData *oam;
+    unsigned int width;
+    unsigned int height;
+    int half_width;
+    int half_height;
+    int32_t x;
+    int32_t y;
+    int16_t matrix[2][2];
+    bool isAffine;
+};
+
+static struct DecodedSprite sSprites[128];
+static int sNumSprites;
+// Whether any of them is semi-transparent, which blends it with what's below
+static bool sAnySemiTransparent;
+// The ones on each line, in the order they're drawn
+static uint8_t sLineSprites[DISPLAY_HEIGHT][128];
+static uint8_t sLineSpriteCount[DISPLAY_HEIGHT];
+static uint8_t sDecodedOam[OAM_SIZE];
+static bool sSpritesDecoded;
+
+static void DecodeSprites(void)
 {
     int i;
-    void *objtiles = VRAM_ + 0x10000;
-    unsigned int blendMode = (REG_BLDCNT >> 6) & 3;
-    bool winShouldBlendPixel = true;
 
-    int16_t matrix[2][2] = {};
-
-    if (!(REG_DISPCNT & (1 << 6)))
-    {
-        puts("2-D OBJ Character mapping not supported.");
-    }
-
+    sNumSprites = 0;
+    sAnySemiTransparent = false;
     for (i = 127; i >= 0; i--)
     {
         struct OamData *oam = &((struct OamData *)OAM)[i];
+        struct DecodedSprite *sprite = &sSprites[sNumSprites];
         unsigned int width;
         unsigned int height;
-        uint16_t *pixels;
 
         bool isAffine  = oam->affineMode & 1;
         bool doubleSizeOrDisabled = (oam->affineMode >> 1) & 1;
-        bool isSemiTransparent = (oam->objMode == 1);
-        bool isObjWin = (oam->objMode == 2);
 
         if (!(isAffine) && doubleSizeOrDisabled) // disable for non-affine
         {
@@ -545,8 +671,6 @@ static void DrawSprites(struct scanlineData* scanline, uint16_t vcount, bool win
         int half_width = width / 2;
         int half_height = height / 2;
 
-        pixels = scanline->spriteLayers[oam->priority];
-
         int32_t x = oam->x;
         int32_t y = oam->y;
 
@@ -557,7 +681,6 @@ static void DrawSprites(struct scanlineData* scanline, uint16_t vcount, bool win
 
         if (isAffine)
         {
-            //TODO: there is probably a better way to do this
             u8 matrixNum = oam->matrixNum * 4;
 
             struct OamData *oam1 = &((struct OamData *)OAM)[matrixNum];
@@ -565,10 +688,10 @@ static void DrawSprites(struct scanlineData* scanline, uint16_t vcount, bool win
             struct OamData *oam3 = &((struct OamData *)OAM)[matrixNum + 2];
             struct OamData *oam4 = &((struct OamData *)OAM)[matrixNum + 3];
 
-            matrix[0][0] = oam1->affineParam;
-            matrix[0][1] = oam2->affineParam;
-            matrix[1][0] = oam3->affineParam;
-            matrix[1][1] = oam4->affineParam;
+            sprite->matrix[0][0] = oam1->affineParam;
+            sprite->matrix[0][1] = oam2->affineParam;
+            sprite->matrix[1][0] = oam3->affineParam;
+            sprite->matrix[1][1] = oam4->affineParam;
 
             if (doubleSizeOrDisabled) // double size for affine
             {
@@ -579,14 +702,78 @@ static void DrawSprites(struct scanlineData* scanline, uint16_t vcount, bool win
         else
         {
             // Identity
-            matrix[0][0] = 0x100;
-            matrix[0][1] = 0;
-            matrix[1][0] = 0;
-            matrix[1][1] = 0x100;
+            sprite->matrix[0][0] = 0x100;
+            sprite->matrix[0][1] = 0;
+            sprite->matrix[1][0] = 0;
+            sprite->matrix[1][1] = 0x100;
         }
 
-        x += half_width;
-        y += half_height;
+        sprite->oam = oam;
+        sprite->width = width;
+        sprite->height = height;
+        sprite->half_width = half_width;
+        sprite->half_height = half_height;
+        sprite->x = x + half_width;
+        sprite->y = y + half_height;
+        sprite->isAffine = isAffine;
+        if (oam->objMode == 1)
+            sAnySemiTransparent = true;
+        sNumSprites++;
+    }
+    memset(sLineSpriteCount, 0, sizeof(sLineSpriteCount));
+    for (i = 0; i < sNumSprites; i++)
+    {
+        int top = sSprites[i].y - sSprites[i].half_height;
+        int bottom = sSprites[i].y + sSprites[i].half_height;
+
+        if (top < 0)
+            top = 0;
+        if (bottom > DISPLAY_HEIGHT)
+            bottom = DISPLAY_HEIGHT;
+        for (int line = top; line < bottom; line++)
+            sLineSprites[line][sLineSpriteCount[line]++] = i;
+    }
+    memcpy(sDecodedOam, OAM, OAM_SIZE);
+    sSpritesDecoded = true;
+}
+
+static void UpdateSprites(void)
+{
+    if (!sSpritesDecoded || memcmp(sDecodedOam, OAM, OAM_SIZE) != 0)
+        DecodeSprites();
+}
+
+// Parts of this code heavily borrowed from NanoboyAdvance.
+static void DrawSprites(struct scanlineData* scanline, uint16_t vcount, bool windowsEnabled)
+{
+    void *objtiles = VRAM_ + 0x10000;
+    unsigned int blendMode = (REG_BLDCNT >> 6) & 3;
+    bool winShouldBlendPixel = true;
+
+    if (!(REG_DISPCNT & (1 << 6)))
+    {
+        puts("2-D OBJ Character mapping not supported.");
+    }
+
+    UpdateSprites();
+    if (vcount >= DISPLAY_HEIGHT)
+        return;
+
+    for (int n = 0; n < sLineSpriteCount[vcount]; n++)
+    {
+        const struct DecodedSprite *sprite = &sSprites[sLineSprites[vcount][n]];
+        struct OamData *oam = sprite->oam;
+        unsigned int width = sprite->width;
+        unsigned int height = sprite->height;
+        int half_width = sprite->half_width;
+        int half_height = sprite->half_height;
+        int32_t x = sprite->x;
+        int32_t y = sprite->y;
+        const int16_t (*matrix)[2] = sprite->matrix;
+        bool isAffine = sprite->isAffine;
+        bool isSemiTransparent = (oam->objMode == 1);
+        bool isObjWin = (oam->objMode == 2);
+        uint16_t *pixels = scanline->spriteLayers[oam->priority];
 
         // Does this sprite actually draw on this scanline?
         if (vcount >= (y - half_height) && vcount < (y + half_height))
@@ -693,6 +880,7 @@ static void DrawSprites(struct scanlineData* scanline, uint16_t vcount, bool win
                         
                         //write pixel to pixel framebuffer
                         pixels[global_x] = color | (1 << 15);
+                        scanline->spritePriorities |= 1 << oam->priority;
                     }
                 }
             }
@@ -705,15 +893,15 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
     unsigned int mode = REG_DISPCNT & 3;
     unsigned char numOfBgs = (mode == 0 ? 4 : 3);
     int bgnum, prnum;
-    struct scanlineData scanline;
+    // Kept from line to line, so that its buffers only need clearing where
+    // they were drawn on. winMask is only read when the windows are on, which
+    // fills it first.
+    static struct scanlineData scanline;
     unsigned int blendMode = (REG_BLDCNT >> 6) & 3;
     unsigned int xpos;
 
 
     //initialize all priority bookkeeping data
-    memset(scanline.layers, 0, sizeof(scanline.layers));
-    memset(scanline.winMask, 0, sizeof(scanline.winMask));
-    memset(scanline.spriteLayers, 0, sizeof(scanline.spriteLayers));
     memset(scanline.prioritySortedBgsCount, 0, sizeof(scanline.prioritySortedBgsCount));
 
     for (bgnum = 0; bgnum < numOfBgs; bgnum++)
@@ -727,14 +915,39 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
         scanline.prioritySortedBgs[priority][priorityCount] = bgnum;
         scanline.prioritySortedBgsCount[priority]++;
     }
-    
+
+    // Most of the overworld's lines have nothing blended with what's below it.
+    // Then nothing reads the backgrounds' layers, and the 4bpp text ones that
+    // don't change brightness are drawn straight onto the line when it's put
+    // together, instead of into their layers first.
+    uint8_t directBgs = 0;
+    {
+        bool spritesBlend = false;
+        bool layersRead;
+
+        if (REG_DISPCNT & DISPCNT_OBJ_ON)
+        {
+            UpdateSprites();
+            spritesBlend = (blendMode == 1 && (REG_BLDCNT & BLDCNT_TGT1_OBJ)) || sAnySemiTransparent;
+        }
+        layersRead = spritesBlend || (blendMode == 1 && (REG_BLDCNT & (REG_DISPCNT >> 8) & 0xF));
+        if (!layersRead)
+        {
+            for (bgnum = 0; bgnum < (mode == 0 ? 4 : mode == 1 ? 2 : 0); bgnum++)
+            {
+                if (CanDrawBGDirectly(scanline.bgcnts[bgnum]) && !(blendMode != 0 && (REG_BLDCNT & (1 << bgnum))))
+                    directBgs |= 1 << bgnum;
+            }
+        }
+    }
+
     switch (mode)
     {
     case 0:
         // All backgrounds are text mode
         for (bgnum = 3; bgnum >= 0; bgnum--)
         {
-            if (isbgEnabled(bgnum))
+            if (isbgEnabled(bgnum) && !(directBgs & (1 << bgnum)))
             {
                 uint16_t bghoffs = *(uint16_t *)(REG_ADDR_BG0HOFS + bgnum * 4);
                 uint16_t bgvoffs = *(uint16_t *)(REG_ADDR_BG0VOFS + bgnum * 4);
@@ -754,7 +967,7 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
         // BG0 and BG1 are text mode
         for (bgnum = 1; bgnum >= 0; bgnum--)
         {
-            if (isbgEnabled(bgnum))
+            if (isbgEnabled(bgnum) && !(directBgs & (1 << bgnum)))
             {
                 uint16_t bghoffs = *(uint16_t *)(REG_ADDR_BG0HOFS + bgnum * 4);
                 uint16_t bgvoffs = *(uint16_t *)(REG_ADDR_BG0VOFS + bgnum * 4);
@@ -765,6 +978,7 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
         break;
     default:
         DBGPRINTF("Video mode %u is unsupported.\n", mode);
+        memset(scanline.layers, 0, sizeof(scanline.layers));
         break;
     }
     
@@ -819,20 +1033,15 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
         windowsEnabled = true;
     }
     
-    //draw to pixel mask
+    //draw to pixel mask: outside, then WIN1 over it, then WIN0, which wins
+    //where they overlap
     if (windowsEnabled)
     {
-        for (xpos = 0; xpos < DISPLAY_WIDTH; xpos++)
-        {
-            //win0 checks
-            if (WIN0enable && winCheckHorizontalBounds(WIN0left, WIN0right, xpos))
-                scanline.winMask[xpos] = REG_WININ & 0x3F;
-            //win1 checks
-            else if (WIN1enable && winCheckHorizontalBounds(WIN1left, WIN1right, xpos))
-                scanline.winMask[xpos] = (REG_WININ >> 8) & 0x3F;
-            else
-                scanline.winMask[xpos] = (REG_WINOUT & 0x3F) | WINMASK_WINOUT;
-        }
+        memsetu16(scanline.winMask, (REG_WINOUT & 0x3F) | WINMASK_WINOUT, DISPLAY_WIDTH);
+        if (WIN1enable)
+            FillWindowSpan(scanline.winMask, WIN1left, WIN1right, (REG_WININ >> 8) & 0x3F);
+        if (WIN0enable)
+            FillWindowSpan(scanline.winMask, WIN0left, WIN0right, REG_WININ & 0x3F);
     }
 
     if (REG_DISPCNT & DISPCNT_OBJ_ON)
@@ -853,7 +1062,15 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
                 // as it is, where the windows let the layer show
                 if (blendMode == 0 || !(REG_BLDCNT & (1 << bgnum)))
                 {
-                    if (!windowsEnabled)
+                    if (directBgs & (1 << bgnum))
+                    {
+                        uint16_t bghoffs = *(uint16_t *)(REG_ADDR_BG0HOFS + bgnum * 4);
+                        uint16_t bgvoffs = *(uint16_t *)(REG_ADDR_BG0VOFS + bgnum * 4);
+
+                        RenderBGScanlineDirect(bgnum, scanline.bgcnts[bgnum], bghoffs, bgvoffs, vcount, pixels,
+                                               windowsEnabled ? scanline.winMask : NULL);
+                    }
+                    else if (!windowsEnabled)
                     {
                         for (xpos = 0; xpos < DISPLAY_WIDTH; xpos++)
                         {
@@ -919,6 +1136,8 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
             }
         }
         //draw sprites on current priority
+        if (!(scanline.spritePriorities & (1 << prnum)))
+            continue;
         uint16_t *src = scanline.spriteLayers[prnum];
         for (xpos = 0; xpos < DISPLAY_WIDTH; xpos++)
         {
@@ -932,6 +1151,13 @@ static void DrawScanline(uint16_t *pixels, uint16_t vcount)
             }
         }
     }
+
+    for (prnum = 0; prnum < 4; prnum++)
+    {
+        if (scanline.spritePriorities & (1 << prnum))
+            memset(scanline.spriteLayers[prnum], 0, sizeof(scanline.spriteLayers[prnum]));
+    }
+    scanline.spritePriorities = 0;
 }
 
 uint16_t *memsetu16(uint16_t *dst, uint16_t fill, size_t count)
@@ -1000,6 +1226,17 @@ void DrawFrame(uint16_t *pixels)
     {
         BeginLine(i);
         DrawLine(&pixels[i * DISPLAY_WIDTH], i);
+        EndLine();
+    }
+}
+
+void SkipFrame(void)
+{
+    int i;
+
+    for (i = 0; i < DISPLAY_HEIGHT; i++)
+    {
+        BeginLine(i);
         EndLine();
     }
 }
