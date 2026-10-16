@@ -100,6 +100,28 @@ To play it in PCSX2, start it with `pcsx2-qt -elf pokeemerald32.elf`, and turn o
 Filesystem in the settings so the game can save. On a PS2, start it with a launcher like
 wLaunchELF.
 
+## PSP
+
+The PSP build needs Linux with the tools that build the game's data (see Linux above), and
+the [pspdev](https://github.com/pspdev/pspdev) toolchain. The build looks for it in
+`~/pspdev`, or in `PSPDEV` if that's set. pspdev's prebuilt release unpacks there:
+```
+cd ~ && curl -sL https://github.com/pspdev/pspdev/releases/latest/download/pspdev-ubuntu-latest-x86_64.tar.gz | tar xz
+```
+
+Build the PSP version with:
+```
+make psp -j$(nproc)
+```
+
+You should get `build/psp32/PSP/GAME/EMERALD_PSP/EBOOT.PBP`. Copy the `EMERALD_PSP` folder to
+`PSP/GAME/` on the memory stick. The game makes its `saves` folder and `settings.ini` there.
+
+`make psp PSP_TEST=1 BUILD_DIR=build-test` builds a version for testing in PPSSPP's headless
+emulator. It plays the PSP buttons in `test_input.txt`, from the folder given to
+`PPSSPPHeadless -r`, one line of `<frames> <buttons>` each, like `30 CROSS+UP` or `60 -`, and
+writes the screen to `shot_NNN.rgba` (480x272 RGBA) after each line with `SHOT` in it.
+
 ## GBA
 
 Follow instructions in [INSTALL.md](INSTALL.md)
