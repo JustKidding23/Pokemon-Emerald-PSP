@@ -157,16 +157,14 @@ int main(int argc, char **argv)
                                  SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | (gSettings.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (sdlWindow == NULL)
     {
-        DBGPRINTF("Window could not be created! SDL_Error: %s
-", SDL_GetError());
+        DBGPRINTF("Window could not be created! SDL_Error: %s\n", SDL_GetError());
         return 1;
     }
 
     sdlRenderer = SDL_CreateRenderer(sdlWindow, -1, SDL_RENDERER_PRESENTVSYNC);
     if (sdlRenderer == NULL)
     {
-        DBGPRINTF("Renderer could not be created! SDL_Error: %s
-", SDL_GetError());
+        DBGPRINTF("Renderer could not be created! SDL_Error: %s\n", SDL_GetError());
         return 1;
     }
 
@@ -183,8 +181,7 @@ int main(int argc, char **argv)
                                    DISPLAY_WIDTH, DISPLAY_HEIGHT);
     if (sdlTexture == NULL)
     {
-        DBGPRINTF("Texture could not be created! SDL_Error: %s
-", SDL_GetError());
+        DBGPRINTF("Texture could not be created! SDL_Error: %s\n", SDL_GetError());
         return 1;
     }
 

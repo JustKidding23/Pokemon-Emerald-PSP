@@ -615,6 +615,13 @@ static u8 CopySaveSlotData(u16 sectorId, struct SaveSectorLocation *locations)
         if (id == 0)
             gLastWrittenSector = i;
 
+#ifdef UBFIX
+        // An erased sector reads as 0xFF, so its id is past the end of
+        // locations. On the GBA its checksum reads garbage and the sector is
+        // skipped because its signature is wrong.
+        if (id >= NUM_SECTORS_PER_SLOT)
+            continue;
+#endif
         checksum = CalculateChecksum(gReadWriteSector->data, locations[id].size);
 
         // Only copy data for sectors whose signature and checksum fields are correct
