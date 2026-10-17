@@ -1,13 +1,16 @@
 #!/bin/bash
 # Makes the PSP menu's art and music for the EBOOT from the game itself:
-# psp/ICON0.PNG (144x80) and psp/PIC1.PNG (480x272) from the title screen, and
-# psp/SND0.AT3 from its music. They're made from the game, so don't share them;
+# psp/ICON0.PNG (144x80), the logo from the end of the intro, psp/PIC1.PNG
+# (480x272), Rayquaza from the intro, and psp/SND0.AT3 from the title
+# screen's music. They're made from the game, so don't share them;
 # .gitignore leaves them out. `make psp` puts them in the EBOOT if they're here.
 #
 # usage: psp/make_art.sh [PC_BINARY] [ATRACDENC]
 #   PC_BINARY: a PC build of this repository (make linux), default ./pokeemerald64
-#   ATRACDENC: https://github.com/dcherednik/atracdenc, for the ATRAC3 music the
-#              PSP plays. Without it there's no SND0.AT3.
+#   ATRACDENC: https://github.com/dcherednik/atracdenc release 0.2.3, for the
+#              ATRAC3 music the PSP plays. A PSP 3001 played its files in the
+#              menu but not those of later versions. Without it there's no
+#              SND0.AT3.
 # Needs ImageMagick and ffmpeg.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,21 +19,38 @@ atracdenc=${2:-$(command -v atracdenc || true)}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Skip the intro to the title screen, and record it for 45 seconds
+# Skip the intro to the title screen, and record its music
 printf '300 -\n2 START\n2700 -\n' > "$work/input.txt"
 "$game" --save "$work/none.sav" --test-input "$work/input.txt" --test-audio "$work/title.wav" \
     --test-shots "$work" --test-shot-every 60 > /dev/null 2>&1
 
-# A frame with Rayquaza and the logo, while PRESS START blinks off
-frame="$work/frame_001680.ppm"
-magick "$frame" -filter point -resize 200% -crop 480x272+0+8 +repage psp/PIC1.PNG
-magick "$frame" -crop 180x100+30+0 +repage -filter Lanczos -resize '144x80!' psp/ICON0.PNG
+# The intro, without skipping it
+mkdir "$work/intro"
+printf '3600 -\n' > "$work/intro.txt"
+"$game" --save "$work/none.sav" --test-input "$work/intro.txt" \
+    --test-shots "$work/intro" --test-shot-every 20 > /dev/null 2>&1
 
-# 30 seconds of the title music at 44100 Hz. The PSP's limit for it is about 500 KB.
+# The background: Rayquaza against the sky near the end of the intro. That's
+# letterboxed to lines 32 to 127, so the sky above and the clouds below are
+# carried on to fill the screen.
+magick "$work/intro/frame_003040.ppm" -crop 240x96+0+32 +repage -filter point -resize 200% \
+    -virtual-pixel Edge -define distort:viewport=480x272+0-40 -distort SRT 0 +repage psp/PIC1.PNG
+# The icon: the logo at the end of the intro, which is on black, made clear
+magick "$work/intro/frame_003600.ppm" -fuzz 2% -transparent black -trim +repage \
+    -filter Lanczos -resize 144x80 -background none -gravity center -extent 144x80 psp/ICON0.PNG
+
+# 18 seconds of the title music at 44100 Hz, about 300 KB, well inside the
+# PSP menu's limit of about 500 KB.
 if [ -n "$atracdenc" ]; then
-    ffmpeg -hide_banner -loglevel error -y -i "$work/title.wav" -ss 6.5 -t 30 \
-        -af "afade=t=in:d=0.3,afade=t=out:st=27.5:d=2.5,aresample=44100" -ac 2 -c:a pcm_s16le "$work/title44.wav"
-    "$atracdenc" -e atrac3 --container riff -i "$work/title44.wav" -o psp/SND0.AT3 > /dev/null
+    ffmpeg -hide_banner -loglevel error -y -i "$work/title.wav" -ss 6.5 -t 18 \
+        -af "afade=t=in:d=0.3,afade=t=out:st=15.5:d=2.5,aresample=44100" -ac 2 -c:a pcm_s16le "$work/title44.wav"
+    # atracdenc picks the RIFF container from the lowercase .at3. It writes the
+    # RIFF size wrong, and the file that played had it set to the file's size
+    # less 8, as RIFF has it.
+    "$atracdenc" -e atrac3 -i "$work/title44.wav" -o "$work/snd0.at3" > /dev/null
+    python3 -c 'import os, struct, sys
+f = open(sys.argv[1], "r+b"); f.seek(4); f.write(struct.pack("<I", os.path.getsize(sys.argv[1]) - 8))' "$work/snd0.at3"
+    cp "$work/snd0.at3" psp/SND0.AT3
 else
     echo "atracdenc not found, so there's no SND0.AT3"
 fi
