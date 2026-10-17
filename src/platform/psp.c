@@ -13,6 +13,11 @@
 #include "task.h"
 #include "constants/characters.h"
 #include "constants/flags.h"
+#include "constants/rgb.h"
+#include "fonts.h"
+#include "string_util.h"
+#include "strings.h"
+#include "text_window.h"
 #include "gba/flash_internal.h"
 #include "platform/framedraw.h"
 #include "platform/psp_hw.h"
@@ -21,7 +26,7 @@
 
 extern void AgbMain(void);
 
-#define NUM_SLOTS 10
+#define NUM_SLOTS 3
 #define SAVE_SIZE sizeof(FLASH_BASE)
 
 // A frame of the display: the game runs a frame for each of them
@@ -43,6 +48,7 @@ static struct
     int frameskip;
     bool showSpeed;
     bool trace;
+    int turboSpeed;
 } sSettings = {
     .slot = 1,
     .scale = PSP_SCALE_FIT,
@@ -50,6 +56,7 @@ static struct
     .circleIsA = false,
     .frameskip = FRAMESKIP_AUTO,
     .showSpeed = false,
+    .turboSpeed = 2,
 };
 
 // The folder EBOOT.PBP is in, ending with a slash
@@ -65,7 +72,8 @@ struct SaveFileInfo
     bool known;
     bool exists;
     bool hasGame;
-    char name[PLAYER_NAME_LENGTH + 1];
+    u8 name[PLAYER_NAME_LENGTH + 1]; // in the game's characters
+    u8 gender;
     u16 hours;
     u8 minutes;
     u8 badges;
@@ -126,6 +134,8 @@ static void LoadSettings(void)
             sSettings.showSpeed = value != 0;
         else if (strcmp(name, "trace") == 0)
             sSettings.trace = value != 0;
+        else if (strcmp(name, "turbo_speed") == 0)
+            sSettings.turboSpeed = ClampSetting(value, 2, 3, 2);
     }
 }
 
@@ -137,7 +147,7 @@ static void StoreSettings(void)
 
     SettingsPath(path, sizeof(path));
     length = snprintf(text, sizeof(text),
-                      "# Pokemon Emerald PSP settings. The menu (Triangle) changes them.\n"
+                      "# Pokemon Emerald PSP settings. The settings menu (the music note button) changes them.\n"
                       "# The save file that's played, from saves/slot1.sav to saves/slot%d.sav\n"
                       "slot = %d\n"
                       "# 0 fits the screen keeping the shape, 1 stretches, 2 is twice the size cut at the\n"
@@ -149,17 +159,25 @@ static void StoreSettings(void)
                       "# 0 skips drawing frames when the PSP falls behind, 1 slows the game down instead\n"
                       "frameskip = %d\n"
                       "show_speed = %d\n"
+                      "# How fast holding Square runs the game: 2 or 3 times\n"
+                      "turbo_speed = %d\n"
                       "# 1 writes what the game is doing to trace.bin all the time, to find crashes (slow)\n"
                       "trace = %d\n",
                       NUM_SLOTS, sSettings.slot, sSettings.scale, sSettings.filter, sSettings.circleIsA,
-                      sSettings.frameskip, sSettings.showSpeed, sSettings.trace);
+                      sSettings.frameskip, sSettings.showSpeed, sSettings.turboSpeed, sSettings.trace);
     PspHw_WriteFile(path, text, length);
 }
 
-// What the menu shows for a save: the newest of the two copies the game keeps
-// (see save.c), read straight from the flash's sectors
+// The save's structs have the GBA's layout on the PSP, which has 32-bit
+// pointers like the GBA, so these offsets are where they are in a save file
+STATIC_ASSERT(offsetof(struct SaveBlock1, flags) == 0x1270, SaveBlock1FlagsOffset);
+STATIC_ASSERT(offsetof(struct SaveBlock2, playTimeHours) == 0x0E, SaveBlock2PlayTimeOffset);
+
+// What the save screen shows for a save: the newest of the two copies the game
+// keeps (see save.c), read straight from the flash's sectors
 static void ReadSaveInfo(const u8 *flash, struct SaveFileInfo *info)
 {
+    static u8 flags[NUM_FLAG_BYTES];
     u32 bestCounter = 0;
     int bestHalf = -1;
 
@@ -181,6 +199,7 @@ static void ReadSaveInfo(const u8 *flash, struct SaveFileInfo *info)
     if (bestHalf < 0)
         return;
 
+    memset(flags, 0, sizeof(flags));
     for (int i = 0; i < NUM_SECTORS_PER_SLOT; i++)
     {
         const struct SaveSector *sector = (const void *)(flash + (bestHalf * NUM_SECTORS_PER_SLOT + i) * SECTOR_SIZE);
@@ -189,45 +208,37 @@ static void ReadSaveInfo(const u8 *flash, struct SaveFileInfo *info)
             continue;
         if (sector->id == SECTOR_ID_SAVEBLOCK2)
         {
-            // SaveBlock2 starts with the name, and has the play time at 0x0E
-            const u8 *name = sector->data;
-            int length;
+            const u8 *block = sector->data;
 
-            for (length = 0; length < PLAYER_NAME_LENGTH; length++)
-            {
-                u8 c = name[length];
-
-                if (c == EOS)
-                    break;
-                if (c >= CHAR_A && c <= CHAR_Z)
-                    info->name[length] = 'A' + (c - CHAR_A);
-                else if (c >= CHAR_a && c <= CHAR_z)
-                    info->name[length] = 'a' + (c - CHAR_a);
-                else if (c >= CHAR_0 && c <= CHAR_0 + 9)
-                    info->name[length] = '0' + (c - CHAR_0);
-                else
-                    info->name[length] = ' ';
-            }
-            info->name[length] = '\0';
-            info->hours = sector->data[0x0E] | (sector->data[0x0F] << 8);
-            info->minutes = sector->data[0x10];
+            memcpy(info->name, block + offsetof(struct SaveBlock2, playerName), PLAYER_NAME_LENGTH);
+            info->name[PLAYER_NAME_LENGTH] = EOS;
+            info->gender = block[offsetof(struct SaveBlock2, playerGender)];
+            info->hours = block[offsetof(struct SaveBlock2, playTimeHours)] | (block[offsetof(struct SaveBlock2, playTimeHours) + 1] << 8);
+            info->minutes = block[offsetof(struct SaveBlock2, playTimeMinutes)];
             info->hasGame = true;
         }
         else if (sector->id >= SECTOR_ID_SAVEBLOCK1_START && sector->id <= SECTOR_ID_SAVEBLOCK1_END)
         {
-            // The badges are flags, and SaveBlock1's flags start at 0x1270 on the GBA
+            // The part of SaveBlock1's flags that's in this sector
             u32 start = (sector->id - SECTOR_ID_SAVEBLOCK1_START) * SECTOR_DATA_SIZE;
 
-            info->badges = 0;
-            for (int badge = 0; badge < NUM_BADGES; badge++)
+            for (u32 j = 0; j < NUM_FLAG_BYTES; j++)
             {
-                u32 flag = FLAG_BADGE01_GET + badge;
-                u32 offset = 0x1270 + flag / 8;
+                u32 offset = offsetof(struct SaveBlock1, flags) + j;
 
-                if (offset >= start && offset < start + SECTOR_DATA_SIZE && (sector->data[offset - start] >> (flag % 8)) & 1)
-                    info->badges++;
+                if (offset >= start && offset < start + SECTOR_DATA_SIZE)
+                    flags[j] = sector->data[offset - start];
             }
         }
+    }
+
+    info->badges = 0;
+    for (int badge = 0; badge < NUM_BADGES; badge++)
+    {
+        u32 flag = FLAG_BADGE01_GET + badge;
+
+        if ((flags[flag / 8] >> (flag % 8)) & 1)
+            info->badges++;
     }
 }
 
@@ -457,71 +468,42 @@ void Platform_SetAlarm(u8 *alarmData)
     // The game never sets an alarm
 }
 
-// The menu, on Triangle. Its rows are the save files, then the settings.
+#define COLOR_WHITE  0xFFFFFFFF
+#define COLOR_GRAY   0xFFA0A0A0
+#define COLOR_YELLOW 0xFF40E0FF
+
+// The settings menu, on the music note button (or Select and Triangle). It's
+// drawn in the PSP's debug text over the game, dimmed.
 enum
 {
-    ROW_SETTING_SCALE = NUM_SLOTS,
+    ROW_SETTING_SCALE,
     ROW_SETTING_FILTER,
     ROW_SETTING_BUTTONS,
     ROW_SETTING_FRAMESKIP,
+    ROW_SETTING_TURBO,
     ROW_SETTING_SPEED,
     ROW_BACK,
     ROW_COUNT,
 };
 
-enum
-{
-    ACTION_NONE,
-    ACTION_CHOOSE,  // what to do with a save file
-    ACTION_COPY_TO, // picking where to copy it
-    ACTION_CONFIRM, // yes or no
-};
-
-enum
-{
-    CONFIRM_SWITCH,
-    CONFIRM_RELOAD,
-    CONFIRM_DELETE,
-    CONFIRM_OVERWRITE,
-};
-
-static const char *const sChoices[] = {"Play this file", "Copy it to another file", "Delete it", "Cancel"};
-
 static struct
 {
     bool open;
     int row;
-    int action;
-    int choice;
-    int slot;       // the file the action is for
-    int target;     // where it's copied to
-    int confirm;
-    bool settingsChanged;
-} sMenu;
+    bool changed;
+} sSettingsMenu;
 
-#define COLOR_WHITE  0xFFFFFFFF
-#define COLOR_GRAY   0xFFA0A0A0
-#define COLOR_YELLOW 0xFF40E0FF
-#define COLOR_GREEN  0xFF60FF60
-#define COLOR_RED    0xFF6060FF
-
-static void OpenMenu(void)
+static void OpenSettings(void)
 {
-    sMenu.open = true;
-    sMenu.row = sSettings.slot - 1;
-    sMenu.action = ACTION_NONE;
-    sMenu.settingsChanged = false;
-    for (int slot = 1; slot <= NUM_SLOTS; slot++)
-    {
-        if (!sSlotInfo[slot].known)
-            RefreshSlotInfo(slot);
-    }
+    sSettingsMenu.open = true;
+    sSettingsMenu.row = 0;
+    sSettingsMenu.changed = false;
 }
 
-static void CloseMenu(void)
+static void CloseSettings(void)
 {
-    sMenu.open = false;
-    if (sMenu.settingsChanged)
+    sSettingsMenu.open = false;
+    if (sSettingsMenu.changed)
         StoreSettings();
 }
 
@@ -541,198 +523,54 @@ static void ChangeSetting(int row, int delta)
     case ROW_SETTING_FRAMESKIP:
         sSettings.frameskip = (sSettings.frameskip + delta + FRAMESKIP_COUNT) % FRAMESKIP_COUNT;
         break;
+    case ROW_SETTING_TURBO:
+        sSettings.turboSpeed = sSettings.turboSpeed == 2 ? 3 : 2;
+        break;
     case ROW_SETTING_SPEED:
         sSettings.showSpeed = !sSettings.showSpeed;
         break;
     default:
         return;
     }
-    sMenu.settingsChanged = true;
+    sSettingsMenu.changed = true;
 }
 
-static void Confirmed(void)
+static void UpdateSettings(u32 pressed)
 {
-    char text[80];
-
-    switch (sMenu.confirm)
+    if (pressed & (PSP_BTN_NOTE | PSP_BTN_CIRCLE | PSP_BTN_TRIANGLE))
     {
-    case CONFIRM_SWITCH:
-    case CONFIRM_RELOAD:
-        // Done between frames once the game allows a reset (see RunFrame)
-        sPendingSlot = sMenu.slot;
-        CloseMenu();
+        CloseSettings();
         return;
-    case CONFIRM_DELETE:
-        if (DeleteSlot(sMenu.slot))
-            snprintf(text, sizeof(text), "File %d deleted.", sMenu.slot);
-        else
-            snprintf(text, sizeof(text), "File %d could not be deleted.", sMenu.slot);
-        ShowStatus(text);
-        break;
-    case CONFIRM_OVERWRITE:
-        if (CopySlot(sMenu.slot, sMenu.target))
-            snprintf(text, sizeof(text), "File %d copied to file %d.", sMenu.slot, sMenu.target);
-        else
-            snprintf(text, sizeof(text), "File %d could not be copied.", sMenu.slot);
-        ShowStatus(text);
-        break;
     }
-    RefreshSlotInfo(sMenu.slot);
-    if (sMenu.confirm == CONFIRM_OVERWRITE)
-        RefreshSlotInfo(sMenu.target);
-    sMenu.action = ACTION_NONE;
-}
-
-static void ChooseAction(void)
-{
-    switch (sMenu.choice)
+    if (pressed & PSP_BTN_UP)
+        sSettingsMenu.row = (sSettingsMenu.row + ROW_COUNT - 1) % ROW_COUNT;
+    if (pressed & PSP_BTN_DOWN)
+        sSettingsMenu.row = (sSettingsMenu.row + 1) % ROW_COUNT;
+    if (pressed & PSP_BTN_LEFT)
+        ChangeSetting(sSettingsMenu.row, -1);
+    if (pressed & PSP_BTN_RIGHT)
+        ChangeSetting(sSettingsMenu.row, 1);
+    if (pressed & PSP_BTN_CROSS)
     {
-    case 0:
-        sMenu.confirm = (sMenu.slot == sSettings.slot) ? CONFIRM_RELOAD : CONFIRM_SWITCH;
-        sMenu.action = ACTION_CONFIRM;
-        break;
-    case 1:
-        sMenu.target = sMenu.slot % NUM_SLOTS + 1;
-        sMenu.action = ACTION_COPY_TO;
-        break;
-    case 2:
-        if (sMenu.slot == sSettings.slot)
-        {
-            ShowStatus("This file is being played. Switch to another one first.");
-            sMenu.action = ACTION_NONE;
-        }
-        else if (!sSlotInfo[sMenu.slot].exists)
-        {
-            ShowStatus("This file is already empty.");
-            sMenu.action = ACTION_NONE;
-        }
+        if (sSettingsMenu.row == ROW_BACK)
+            CloseSettings();
         else
-        {
-            sMenu.confirm = CONFIRM_DELETE;
-            sMenu.action = ACTION_CONFIRM;
-        }
-        break;
-    default:
-        sMenu.action = ACTION_NONE;
-        break;
+            ChangeSetting(sSettingsMenu.row, 1);
     }
 }
 
-static void UpdateMenu(u32 pressed)
-{
-    switch (sMenu.action)
-    {
-    case ACTION_NONE:
-        if (pressed & PSP_BTN_TRIANGLE)
-        {
-            CloseMenu();
-            return;
-        }
-        if (pressed & PSP_BTN_UP)
-            sMenu.row = (sMenu.row + ROW_COUNT - 1) % ROW_COUNT;
-        if (pressed & PSP_BTN_DOWN)
-            sMenu.row = (sMenu.row + 1) % ROW_COUNT;
-        if (pressed & PSP_BTN_LEFT)
-            ChangeSetting(sMenu.row, -1);
-        if (pressed & PSP_BTN_RIGHT)
-            ChangeSetting(sMenu.row, 1);
-        if (pressed & PSP_BTN_CIRCLE)
-            CloseMenu();
-        else if (pressed & PSP_BTN_CROSS)
-        {
-            if (sMenu.row < NUM_SLOTS)
-            {
-                sMenu.slot = sMenu.row + 1;
-                sMenu.choice = 0;
-                sMenu.action = ACTION_CHOOSE;
-            }
-            else if (sMenu.row == ROW_BACK)
-                CloseMenu();
-            else
-                ChangeSetting(sMenu.row, 1);
-        }
-        break;
-    case ACTION_CHOOSE:
-        if (pressed & PSP_BTN_UP)
-            sMenu.choice = (sMenu.choice + ARRAY_COUNT(sChoices) - 1) % ARRAY_COUNT(sChoices);
-        if (pressed & PSP_BTN_DOWN)
-            sMenu.choice = (sMenu.choice + 1) % ARRAY_COUNT(sChoices);
-        if (pressed & (PSP_BTN_CIRCLE | PSP_BTN_TRIANGLE))
-            sMenu.action = ACTION_NONE;
-        else if (pressed & PSP_BTN_CROSS)
-            ChooseAction();
-        break;
-    case ACTION_COPY_TO:
-        if (pressed & PSP_BTN_UP)
-            sMenu.target = (sMenu.target + NUM_SLOTS - 2) % NUM_SLOTS + 1;
-        if (pressed & PSP_BTN_DOWN)
-            sMenu.target = sMenu.target % NUM_SLOTS + 1;
-        if (pressed & (PSP_BTN_CIRCLE | PSP_BTN_TRIANGLE))
-            sMenu.action = ACTION_NONE;
-        else if (pressed & PSP_BTN_CROSS)
-        {
-            if (sMenu.target == sMenu.slot)
-                ShowStatus("Pick a different file to copy it to.");
-            else if (sMenu.target == sSettings.slot)
-                ShowStatus("That file is being played. Switch to another one first.");
-            else
-            {
-                sMenu.confirm = CONFIRM_OVERWRITE;
-                sMenu.action = ACTION_CONFIRM;
-            }
-        }
-        break;
-    case ACTION_CONFIRM:
-        if (pressed & (PSP_BTN_CIRCLE | PSP_BTN_TRIANGLE))
-            sMenu.action = ACTION_NONE;
-        else if (pressed & PSP_BTN_CROSS)
-            Confirmed();
-        break;
-    }
-}
-
-static void DescribeSlot(int slot, char *text, size_t size)
-{
-    const struct SaveFileInfo *info = &sSlotInfo[slot];
-
-    if (!info->exists)
-        snprintf(text, size, "File %-2d  (empty)", slot);
-    else if (!info->hasGame)
-        snprintf(text, size, "File %-2d  (no game saved yet)", slot);
-    else
-        snprintf(text, size, "File %-2d  %-8s %4u:%02u   %u badge%s", slot, info->name,
-                 info->hours, info->minutes, info->badges, info->badges == 1 ? "" : "s");
-}
-
-static void DrawMenu(void)
+static void DrawSettings(void)
 {
     static const char *const sScaleNames[] = {"Fit", "Stretch", "2x (cropped)", "Original size"};
     static const char *const sFrameskipNames[] = {"Auto", "Off"};
     char text[PSP_TEXT_COLUMNS + 1];
-    int row = 1;
+    int row = 2;
 
-    PspHw_Print(2, row, COLOR_YELLOW, "POKEMON EMERALD PSP");
-    PspHw_Print(40, row, COLOR_GRAY, "Triangle: back");
+    PspHw_Print(2, row, COLOR_YELLOW, "POKEMON EMERALD PSP SETTINGS");
     row += 2;
-    PspHw_Print(2, row++, COLOR_YELLOW, "SAVE FILES");
-    for (int slot = 1; slot <= NUM_SLOTS; slot++, row++)
+    for (int i = 0; i < ROW_COUNT; i++, row++)
     {
-        bool selected = sMenu.row == slot - 1;
-        u32 color = selected ? COLOR_WHITE : COLOR_GRAY;
-
-        DescribeSlot(slot, text, sizeof(text));
-        PspHw_Print(2, row, COLOR_WHITE, selected ? ">" : " ");
-        PspHw_Print(4, row, color, text);
-        if (slot == sSettings.slot)
-            PspHw_Print(50, row, COLOR_GREEN, "PLAYING");
-        if (sMenu.action == ACTION_COPY_TO && slot == sMenu.target)
-            PspHw_Print(50, row, COLOR_YELLOW, "<- HERE");
-    }
-    row++;
-    PspHw_Print(2, row++, COLOR_YELLOW, "SETTINGS");
-    for (int i = ROW_SETTING_SCALE; i < ROW_COUNT; i++, row++)
-    {
-        bool selected = sMenu.row == i;
+        bool selected = sSettingsMenu.row == i;
         u32 color = selected ? COLOR_WHITE : COLOR_GRAY;
         const char *name = "", *value = "";
 
@@ -754,6 +592,10 @@ static void DrawMenu(void)
             name = "Frame skip";
             value = sFrameskipNames[sSettings.frameskip];
             break;
+        case ROW_SETTING_TURBO:
+            name = "Turbo (hold Square)";
+            value = sSettings.turboSpeed == 2 ? "2x" : "3x";
+            break;
         case ROW_SETTING_SPEED:
             name = "Show speed";
             value = sSettings.showSpeed ? "On" : "Off";
@@ -768,60 +610,522 @@ static void DrawMenu(void)
         if (*value != '\0')
         {
             snprintf(text, sizeof(text), "< %s >", value);
-            PspHw_Print(24, row, color, text);
+            PspHw_Print(26, row, color, text);
         }
     }
+    PspHw_Print(2, 30, COLOR_GRAY, "Left and Right: change   Circle or the note button: back");
+}
 
-    row = 28;
-    switch (sMenu.action)
+// The save file screen, on Triangle. It's drawn like the game's CONTINUE
+// screen (see main_menu.c), with its font, window frame and colors, into an
+// image of the GBA's size.
+#define SAVES_BG_COLOR    RGB(17, 18, 31) // graphics/interface/main_menu_bg.pal
+#define TEXT_WHITE        RGB_WHITE
+#define TEXT_DARK         RGB(12, 12, 12)
+#define TEXT_SHADOW       RGB(26, 26, 25)
+#define TEXT_MALE         RGB(4, 16, 31)
+#define TEXT_FEMALE       RGB(31, 3, 21)
+#define HELP_SHADOW       RGB(8, 8, 16)
+
+// Where the windows are, in tiles, like the main menu's
+#define FILE_WINDOW_LEFT  2
+#define FILE_WINDOW_WIDTH 26
+#define FILE_WINDOW_HEIGHT 4
+#define FILE_WINDOW_TOP(i) (1 + (i) * 6)
+
+enum
+{
+    SAVES_LIST,     // picking a file
+    SAVES_ACTIONS,  // what to do with it
+    SAVES_COPY_TO,  // where to copy it
+    SAVES_CONFIRM,  // yes or no
+    SAVES_MESSAGE,  // a message, until A or B
+};
+
+enum
+{
+    ACTION_PLAY,
+    ACTION_COPY,
+    ACTION_DELETE,
+    ACTION_CANCEL,
+    ACTION_COUNT,
+};
+
+enum
+{
+    CONFIRM_SWITCH,
+    CONFIRM_RELOAD,
+    CONFIRM_DELETE,
+    CONFIRM_OVERWRITE,
+};
+
+static struct
+{
+    bool open;
+    int mode;
+    int file;       // 0 to NUM_SLOTS - 1, the file the cursor is on
+    int action;
+    int source;     // the file being copied
+    int confirm;
+    bool yes;
+    char message[2][40];
+} sSaves;
+
+static u16 __attribute__((aligned(16))) sSavesImage[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+// Like the main menu's darkening of the windows that aren't selected
+static bool sDarken;
+
+static u16 DarkenColor(u16 color)
+{
+    u32 r = color & 0x1F, g = (color >> 5) & 0x1F, b = (color >> 10) & 0x1F;
+
+    // BLDY 7, as the main menu sets it
+    r -= r * 7 / 16;
+    g -= g * 7 / 16;
+    b -= b * 7 / 16;
+    return r | (g << 5) | (b << 10);
+}
+
+static inline void Plot(int x, int y, u16 color)
+{
+    if (x >= 0 && x < DISPLAY_WIDTH && y >= 0 && y < DISPLAY_HEIGHT)
+        sSavesImage[y * DISPLAY_WIDTH + x] = sDarken ? DarkenColor(color) : color;
+}
+
+static void FillRect(int x, int y, int width, int height, u16 color)
+{
+    for (int j = 0; j < height; j++)
     {
-    case ACTION_NONE:
-        if (sMenu.row < NUM_SLOTS)
-            PspHw_Print(2, row, COLOR_GRAY, "Cross: choose   Circle: back to the game");
-        else if (sMenu.row < ROW_BACK)
-            PspHw_Print(2, row, COLOR_GRAY, "Left and Right: change   Circle: back to the game");
-        break;
-    case ACTION_CHOOSE:
-        snprintf(text, sizeof(text), "File %d:", sMenu.slot);
-        PspHw_Print(2, row - 1, COLOR_YELLOW, text);
-        for (int i = 0; i < (int)ARRAY_COUNT(sChoices); i++)
-        {
-            const char *label = sChoices[i];
+        for (int i = 0; i < width; i++)
+            Plot(x + i, y + j, color);
+    }
+}
 
-            if (i == 0 && sMenu.slot == sSettings.slot)
-                label = "Go back to its last save";
-            PspHw_Print(4, row + i, i == sMenu.choice ? COLOR_WHITE : COLOR_GRAY, i == sMenu.choice ? ">" : " ");
-            PspHw_Print(6, row + i, i == sMenu.choice ? COLOR_WHITE : COLOR_GRAY, label);
-        }
-        break;
-    case ACTION_COPY_TO:
-        snprintf(text, sizeof(text), "Copy file %d to which file? Up and Down pick, Cross copies.", sMenu.slot);
-        PspHw_Print(2, row, COLOR_YELLOW, text);
-        break;
-    case ACTION_CONFIRM:
-        switch (sMenu.confirm)
+// An 8x8 4bpp tile, where color 0 is clear
+static void DrawTile(const u8 *tile, const u16 *palette, int x, int y)
+{
+    for (int row = 0; row < 8; row++)
+    {
+        for (int col = 0; col < 8; col++)
         {
-        case CONFIRM_SWITCH:
-            snprintf(text, sizeof(text), "Play file %d?", sMenu.slot);
-            PspHw_Print(2, row, COLOR_YELLOW, text);
-            PspHw_Print(2, row + 1, COLOR_WHITE, "What you've done since you last saved will be lost.");
-            break;
-        case CONFIRM_RELOAD:
-            PspHw_Print(2, row, COLOR_YELLOW, "Go back to this file's last save?");
-            PspHw_Print(2, row + 1, COLOR_WHITE, "What you've done since you last saved will be lost.");
-            break;
-        case CONFIRM_DELETE:
-            snprintf(text, sizeof(text), "Delete file %d? This can't be undone.", sMenu.slot);
-            PspHw_Print(2, row, COLOR_RED, text);
-            break;
-        case CONFIRM_OVERWRITE:
-            snprintf(text, sizeof(text), "Copy file %d over file %d?", sMenu.slot, sMenu.target);
-            PspHw_Print(2, row, COLOR_YELLOW, text);
-            if (sSlotInfo[sMenu.target].exists)
-                PspHw_Print(2, row + 1, COLOR_RED, "What's in that file now will be lost.");
+            u8 pair = tile[row * 4 + col / 2];
+            u8 index = (col & 1) ? pair >> 4 : pair & 0xF;
+
+            if (index != 0)
+                Plot(x + col, y + row, palette[index]);
+        }
+    }
+}
+
+// A white window with the player's chosen frame around it, which the main
+// menu draws with tiles 0 to 8 of the frame (see DrawMainMenuWindowBorder)
+static void DrawWindow(int left, int top, int width, int height)
+{
+    const struct TilesPal *frame = GetWindowFrameTilesPal(gSaveBlock2Ptr->optionsWindowFrameType);
+    const u8 *tiles = frame->tiles;
+
+    FillRect(left * 8, top * 8, width * 8, height * 8, TEXT_WHITE);
+    DrawTile(tiles + 0 * 32, frame->pal, (left - 1) * 8, (top - 1) * 8);
+    DrawTile(tiles + 2 * 32, frame->pal, (left + width) * 8, (top - 1) * 8);
+    DrawTile(tiles + 6 * 32, frame->pal, (left - 1) * 8, (top + height) * 8);
+    DrawTile(tiles + 8 * 32, frame->pal, (left + width) * 8, (top + height) * 8);
+    for (int i = 0; i < width; i++)
+    {
+        DrawTile(tiles + 1 * 32, frame->pal, (left + i) * 8, (top - 1) * 8);
+        DrawTile(tiles + 7 * 32, frame->pal, (left + i) * 8, (top + height) * 8);
+    }
+    for (int j = 0; j < height; j++)
+    {
+        DrawTile(tiles + 3 * 32, frame->pal, (left - 1) * 8, (top + j) * 8);
+        DrawTile(tiles + 5 * 32, frame->pal, (left + width) * 8, (top + j) * 8);
+    }
+}
+
+// One 8x8 tile of a glyph: a row is 16 bits of 2-bit pixels, the left four
+// in the high byte, leftmost in its top bits. 1 is the text, 2 its shadow.
+static void DrawGlyphTile(const u16 *rows, int x, int y, u16 fg, u16 shadow)
+{
+    for (int row = 0; row < 8; row++)
+    {
+        for (int col = 0; col < 8; col++)
+        {
+            u8 half = (col < 4) ? rows[row] >> 8 : rows[row] & 0xFF;
+            u8 pixel = (half >> (6 - 2 * (col & 3))) & 3;
+
+            if (pixel == 1)
+                Plot(x + col, y + row, fg);
+            else if (pixel == 2)
+                Plot(x + col, y + row, shadow);
+        }
+    }
+}
+
+// In FONT_NORMAL, like DecompressGlyph_Normal draws it
+static int GlyphWidth(u8 c)
+{
+    return gFontNormalLatinGlyphWidths[c];
+}
+
+static int StringWidth(const u8 *text)
+{
+    int width = 0;
+
+    for (; *text != EOS; text++)
+        width += GlyphWidth(*text);
+    return width;
+}
+
+static void DrawString(const u8 *text, int x, int y, u16 fg, u16 shadow)
+{
+    for (; *text != EOS; text++)
+    {
+        const u16 *glyph = gFontNormalLatinGlyphs + 0x20 * *text;
+        int width = GlyphWidth(*text);
+
+        if (width <= 8)
+        {
+            DrawGlyphTile(glyph, x, y, fg, shadow);
+            DrawGlyphTile(glyph + 0x10, x, y + 8, fg, shadow);
+        }
+        else
+        {
+            DrawGlyphTile(glyph, x, y, fg, shadow);
+            DrawGlyphTile(glyph + 0x8, x + 8, y, fg, shadow);
+            DrawGlyphTile(glyph + 0x10, x, y + 8, fg, shadow);
+            DrawGlyphTile(glyph + 0x18, x + 8, y + 8, fg, shadow);
+        }
+        x += width;
+    }
+}
+
+static void DrawStringRightAligned(const u8 *text, int right, int y, u16 fg, u16 shadow)
+{
+    DrawString(text, right - StringWidth(text), y, fg, shadow);
+}
+
+// Plain text in the game's characters
+static void AsciiToGame(const char *text, u8 *out, size_t size)
+{
+    size_t n = 0;
+
+    for (; *text != '\0' && n + 1 < size; text++, n++)
+    {
+        char c = *text;
+
+        if (c >= 'A' && c <= 'Z')
+            out[n] = CHAR_A + (c - 'A');
+        else if (c >= 'a' && c <= 'z')
+            out[n] = CHAR_a + (c - 'a');
+        else if (c >= '0' && c <= '9')
+            out[n] = CHAR_0 + (c - '0');
+        else if (c == '.')
+            out[n] = CHAR_PERIOD;
+        else if (c == ',')
+            out[n] = CHAR_COMMA;
+        else if (c == '?')
+            out[n] = CHAR_QUESTION_MARK;
+        else if (c == '!')
+            out[n] = CHAR_EXCL_MARK;
+        else if (c == ':')
+            out[n] = CHAR_COLON;
+        else if (c == '-')
+            out[n] = CHAR_HYPHEN;
+        else if (c == '\'')
+            out[n] = CHAR_SGL_QUOTE_RIGHT;
+        else
+            out[n] = CHAR_SPACE;
+    }
+    out[n] = EOS;
+}
+
+static void DrawAscii(const char *text, int x, int y, u16 fg, u16 shadow)
+{
+    u8 game[64];
+
+    AsciiToGame(text, game, sizeof(game));
+    DrawString(game, x, y, fg, shadow);
+}
+
+static void DrawFileWindow(int file)
+{
+    const struct SaveFileInfo *info = &sSlotInfo[file + 1];
+    int x = FILE_WINDOW_LEFT * 8, y = FILE_WINDOW_TOP(file) * 8;
+    u16 infoColor = info->gender == MALE ? TEXT_MALE : TEXT_FEMALE;
+    u8 text[16];
+    char header[16];
+
+    // The selected one isn't darkened, like on the main menu
+    sDarken = file != sSaves.file;
+    DrawWindow(FILE_WINDOW_LEFT, FILE_WINDOW_TOP(file), FILE_WINDOW_WIDTH, FILE_WINDOW_HEIGHT);
+
+    snprintf(header, sizeof(header), "FILE %d", file + 1);
+    DrawAscii(header, x, y + 1, TEXT_DARK, TEXT_SHADOW);
+    if (!info->hasGame)
+    {
+        DrawAscii("NEW GAME", x, y + 17, TEXT_DARK, TEXT_SHADOW);
+    }
+    else
+    {
+        u8 *end;
+
+        // Like MainMenu_FormatSavegamePlayer, Time and Badges
+        DrawStringRightAligned(info->name, x + 100, y + 1, infoColor, TEXT_SHADOW);
+        DrawString(gText_ContinueMenuTime, x, y + 17, infoColor, TEXT_SHADOW);
+        end = ConvertIntToDecimalStringN(text, info->hours, STR_CONV_MODE_LEFT_ALIGN, 3);
+        *end++ = CHAR_COLON;
+        ConvertIntToDecimalStringN(end, info->minutes, STR_CONV_MODE_LEADING_ZEROS, 2);
+        DrawStringRightAligned(text, x + 100, y + 17, infoColor, TEXT_SHADOW);
+        DrawString(gText_ContinueMenuBadges, x + 0x6C, y + 17, infoColor, TEXT_SHADOW);
+        ConvertIntToDecimalStringN(text, info->badges, STR_CONV_MODE_LEADING_ZEROS, 1);
+        DrawStringRightAligned(text, x + 0xD0, y + 17, infoColor, TEXT_SHADOW);
+    }
+    if (file + 1 == sSettings.slot)
+        DrawAscii("PLAYING", x + 0x6C, y + 1, TEXT_DARK, TEXT_SHADOW);
+    sDarken = false;
+}
+
+static void DrawSavesScreen(void)
+{
+    static const char *const sActions[ACTION_COUNT] = {"PLAY", "COPY", "DELETE", "CANCEL"};
+    const char *a = sSettings.circleIsA ? "O" : "X";
+    const char *b = sSettings.circleIsA ? "X" : "O";
+    char help[64];
+
+    FillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, SAVES_BG_COLOR);
+    for (int file = 0; file < NUM_SLOTS; file++)
+        DrawFileWindow(file);
+
+    switch (sSaves.mode)
+    {
+    case SAVES_LIST:
+        snprintf(help, sizeof(help), "%s CHOOSE   %s BACK", a, b);
+        DrawAscii(help, 16, 145, TEXT_WHITE, HELP_SHADOW);
+        break;
+    case SAVES_ACTIONS:
+        DrawWindow(20, 11, 8, 8);
+        for (int i = 0; i < ACTION_COUNT; i++)
+        {
+            const char *label = sActions[i];
+
+            if (i == ACTION_PLAY && sSaves.file + 1 == sSettings.slot)
+                label = "RELOAD";
+            DrawAscii(label, 168, 88 + 1 + i * 16, TEXT_DARK, TEXT_SHADOW);
+        }
+        // The game's menu cursor
+        {
+            u8 cursor[2] = {CHAR_BLACK_TRIANGLE, EOS};
+
+            DrawString(cursor, 160, 88 + 1 + sSaves.action * 16, TEXT_DARK, TEXT_SHADOW);
+        }
+        break;
+    case SAVES_COPY_TO:
+        // On the help line, so the files stay in sight
+        snprintf(help, sizeof(help), "Copy to which file?   %s OK   %s BACK", a, b);
+        DrawAscii(help, 16, 145, TEXT_WHITE, HELP_SHADOW);
+        break;
+    case SAVES_CONFIRM:
+    case SAVES_MESSAGE:
+        DrawWindow(2, 15, 26, 4);
+        DrawAscii(sSaves.message[0], 16, 121, TEXT_DARK, TEXT_SHADOW);
+        DrawAscii(sSaves.message[1], 16, 137, TEXT_DARK, TEXT_SHADOW);
+        if (sSaves.mode == SAVES_CONFIRM)
+        {
+            u8 cursor[2] = {CHAR_BLACK_TRIANGLE, EOS};
+
+            DrawWindow(23, 9, 5, 4);
+            DrawString(cursor, 184, 72 + 1 + (sSaves.yes ? 0 : 16), TEXT_DARK, TEXT_SHADOW);
+            DrawString(gText_Yes, 192, 72 + 1, TEXT_DARK, TEXT_SHADOW);
+            DrawString(gText_No, 192, 72 + 17, TEXT_DARK, TEXT_SHADOW);
+        }
+        break;
+    }
+}
+
+static void ShowSavesMessage(const char *line1, const char *line2)
+{
+    snprintf(sSaves.message[0], sizeof(sSaves.message[0]), "%s", line1);
+    snprintf(sSaves.message[1], sizeof(sSaves.message[1]), "%s", line2);
+    sSaves.mode = SAVES_MESSAGE;
+}
+
+static void AskSaves(int confirm, const char *line1, const char *line2)
+{
+    ShowSavesMessage(line1, line2);
+    sSaves.mode = SAVES_CONFIRM;
+    sSaves.confirm = confirm;
+    // NO first for anything that loses something
+    sSaves.yes = false;
+}
+
+static void OpenSaves(void)
+{
+    sSaves.open = true;
+    sSaves.mode = SAVES_LIST;
+    sSaves.file = sSettings.slot - 1;
+    for (int slot = 1; slot <= NUM_SLOTS; slot++)
+    {
+        if (!sSlotInfo[slot].known)
+            RefreshSlotInfo(slot);
+    }
+}
+
+static void SavesConfirmed(void)
+{
+    char text[40];
+    int slot = sSaves.file + 1;
+
+    switch (sSaves.confirm)
+    {
+    case CONFIRM_SWITCH:
+    case CONFIRM_RELOAD:
+        // Done between frames once the game allows a reset (see SwitchSlotIfPending)
+        sPendingSlot = slot;
+        sSaves.open = false;
+        return;
+    case CONFIRM_DELETE:
+        DeleteSlot(slot);
+        RefreshSlotInfo(slot);
+        snprintf(text, sizeof(text), "FILE %d was deleted.", slot);
+        ShowSavesMessage(text, "");
+        break;
+    case CONFIRM_OVERWRITE:
+        if (CopySlot(sSaves.source + 1, slot))
+            snprintf(text, sizeof(text), "FILE %d was copied to FILE %d.", sSaves.source + 1, slot);
+        else
+            snprintf(text, sizeof(text), "FILE %d couldn't be copied.", sSaves.source + 1);
+        RefreshSlotInfo(slot);
+        ShowSavesMessage(text, "");
+        break;
+    }
+}
+
+static void ChooseSavesAction(void)
+{
+    char text[40];
+    int slot = sSaves.file + 1;
+
+    switch (sSaves.action)
+    {
+    case ACTION_PLAY:
+        if (slot == sSettings.slot)
+        {
+            AskSaves(CONFIRM_RELOAD, "Go back to this file's last save?", "Anything not saved will be lost.");
+        }
+        else
+        {
+            snprintf(text, sizeof(text), "Play FILE %d?", slot);
+            AskSaves(CONFIRM_SWITCH, text, "Anything not saved will be lost.");
+        }
+        break;
+    case ACTION_COPY:
+        if (!sSlotInfo[slot].hasGame)
+        {
+            ShowSavesMessage("There's no game in this file", "to copy.");
             break;
         }
-        PspHw_Print(2, row + 3, COLOR_GRAY, "Cross: yes   Circle: no");
+        sSaves.source = sSaves.file;
+        sSaves.file = (sSaves.file + 1) % NUM_SLOTS;
+        if (sSaves.file + 1 == sSettings.slot)
+            sSaves.file = (sSaves.file + 1) % NUM_SLOTS;
+        sSaves.mode = SAVES_COPY_TO;
+        break;
+    case ACTION_DELETE:
+        if (slot == sSettings.slot)
+        {
+            ShowSavesMessage("This file is being played.", "Play another file to delete it.");
+        }
+        else if (!sSlotInfo[slot].exists)
+        {
+            ShowSavesMessage("This file is already empty.", "");
+        }
+        else
+        {
+            snprintf(text, sizeof(text), "Delete FILE %d?", slot);
+            AskSaves(CONFIRM_DELETE, text, "It can't be brought back.");
+        }
+        break;
+    default:
+        sSaves.mode = SAVES_LIST;
+        break;
+    }
+}
+
+static void UpdateSaves(u32 pressed)
+{
+    u32 aButton = sSettings.circleIsA ? PSP_BTN_CIRCLE : PSP_BTN_CROSS;
+    u32 bButton = sSettings.circleIsA ? PSP_BTN_CROSS : PSP_BTN_CIRCLE;
+    char text[40];
+
+    switch (sSaves.mode)
+    {
+    case SAVES_LIST:
+        if (pressed & (bButton | PSP_BTN_TRIANGLE))
+        {
+            sSaves.open = false;
+            return;
+        }
+        if (pressed & PSP_BTN_UP)
+            sSaves.file = (sSaves.file + NUM_SLOTS - 1) % NUM_SLOTS;
+        if (pressed & PSP_BTN_DOWN)
+            sSaves.file = (sSaves.file + 1) % NUM_SLOTS;
+        if (pressed & aButton)
+        {
+            sSaves.action = ACTION_PLAY;
+            sSaves.mode = SAVES_ACTIONS;
+        }
+        break;
+    case SAVES_ACTIONS:
+        if (pressed & PSP_BTN_UP)
+            sSaves.action = (sSaves.action + ACTION_COUNT - 1) % ACTION_COUNT;
+        if (pressed & PSP_BTN_DOWN)
+            sSaves.action = (sSaves.action + 1) % ACTION_COUNT;
+        if (pressed & (bButton | PSP_BTN_TRIANGLE))
+            sSaves.mode = SAVES_LIST;
+        else if (pressed & aButton)
+            ChooseSavesAction();
+        break;
+    case SAVES_COPY_TO:
+        // The source and the file being played can't be picked
+        for (int dir = (pressed & PSP_BTN_UP) ? -1 : (pressed & PSP_BTN_DOWN) ? 1 : 0, tries = 0; dir != 0 && tries < NUM_SLOTS; tries++)
+        {
+            sSaves.file = (sSaves.file + dir + NUM_SLOTS) % NUM_SLOTS;
+            if (sSaves.file != sSaves.source && sSaves.file + 1 != sSettings.slot)
+                break;
+        }
+        if (pressed & (bButton | PSP_BTN_TRIANGLE))
+        {
+            sSaves.file = sSaves.source;
+            sSaves.mode = SAVES_LIST;
+        }
+        else if (pressed & aButton)
+        {
+            if (sSaves.file == sSaves.source || sSaves.file + 1 == sSettings.slot)
+            {
+                ShowSavesMessage("Pick a file that isn't being", "played to copy it to.");
+            }
+            else
+            {
+                snprintf(text, sizeof(text), "Copy FILE %d over FILE %d?", sSaves.source + 1, sSaves.file + 1);
+                AskSaves(CONFIRM_OVERWRITE, text, sSlotInfo[sSaves.file + 1].exists ? "What's in it now will be lost." : "");
+            }
+        }
+        break;
+    case SAVES_CONFIRM:
+        if (pressed & (PSP_BTN_UP | PSP_BTN_DOWN))
+            sSaves.yes = !sSaves.yes;
+        if (pressed & (bButton | PSP_BTN_TRIANGLE))
+            sSaves.mode = SAVES_LIST;
+        else if (pressed & aButton)
+        {
+            if (sSaves.yes)
+                SavesConfirmed();
+            else
+                sSaves.mode = SAVES_LIST;
+        }
+        break;
+    case SAVES_MESSAGE:
+        if (pressed & (aButton | bButton | PSP_BTN_TRIANGLE))
+            sSaves.mode = SAVES_LIST;
         break;
     }
 }
@@ -965,10 +1269,14 @@ int main(int argc, char **argv)
     u32 speedFrames = 0, speedDrawn = 0;
     // Where the time goes, in microseconds a second
     u64 timeGame = 0, timeDraw = 0, timeSound = 0, timeStart;
+    int speed, lastSpeed = 1;
+    u32 soundFrame = 0;
     char speedText[80] = "";
 
     PspHw_Init();
     FindBaseDir(argc > 0 ? argv[0] : NULL);
+    snprintf(path, sizeof(path), "%skbuttons.prx", sBaseDir);
+    PspHw_StartKernelButtons(path);
     snprintf(path, sizeof(path), "%ssaves", sBaseDir);
     PspHw_MakeDir(path);
     LoadSettings();
@@ -1012,17 +1320,22 @@ int main(int argc, char **argv)
         held = buttons;
         PspHw_Heartbeat();
 
-        if (sMenu.open)
+        if (sSaves.open || sSettingsMenu.open)
         {
             PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_MENU);
-            UpdateMenu(pressed);
-            PspHw_DrawGame(image, sSettings.scale, sSettings.filter, sMenu.open);
-            if (sMenu.open)
-                DrawMenu();
-            if (sStatusFrames != 0)
+            if (sSaves.open)
             {
-                PspHw_Print(2, 32, COLOR_YELLOW, sStatus);
-                sStatusFrames--;
+                UpdateSaves(pressed);
+                if (sSaves.open)
+                    DrawSavesScreen();
+                PspHw_DrawGame(sSaves.open ? sSavesImage : image, sSettings.scale, sSettings.filter, false);
+            }
+            else
+            {
+                UpdateSettings(pressed);
+                PspHw_DrawGame(image, sSettings.scale, sSettings.filter, sSettingsMenu.open);
+                if (sSettingsMenu.open)
+                    DrawSettings();
             }
             PspHw_Present();
             // The game was stopped, so its clock starts again from here
@@ -1030,28 +1343,41 @@ int main(int argc, char **argv)
             framesRun = 0;
             continue;
         }
+        // The note button opens the settings. Where it can't be read, like in
+        // PPSSPP, Select and Triangle do. Triangle opens the save files.
+        if ((pressed & PSP_BTN_NOTE) || ((pressed & PSP_BTN_TRIANGLE) && (buttons & PSP_BTN_SELECT)))
+        {
+            OpenSettings();
+            continue;
+        }
         if (pressed & PSP_BTN_TRIANGLE)
         {
-            OpenMenu();
+            OpenSaves();
             continue;
         }
 
         // How many frames the game should have run by now. It runs one a
-        // display frame, and catches up when it falls behind by running frames
-        // without drawing them. Holding Square runs it four times as fast.
+        // display frame, or with Square held two or three (the turbo speed),
+        // and catches up when it falls behind by running frames without
+        // drawing them.
         now = PspHw_Microseconds();
-        framesDue = (int)((now - clockStart) / FRAME_MICROSECONDS - framesRun) + 1;
+        speed = (buttons & PSP_BTN_SQUARE) ? sSettings.turboSpeed : 1;
+        if (speed != lastSpeed)
+        {
+            clockStart = now;
+            framesRun = 0;
+            lastSpeed = speed;
+        }
+        framesDue = (int)((now - clockStart) * speed / FRAME_MICROSECONDS - framesRun) + 1;
         if (framesDue < 1 || sSettings.frameskip == FRAMESKIP_OFF)
-            framesDue = 1;
-        if (framesDue > 4)
+            framesDue = speed;
+        if (framesDue > 4 * speed)
         {
             // Too far behind to catch up, like after loading: carry on from here
-            framesDue = 4;
+            framesDue = 4 * speed;
             clockStart = now;
             framesRun = 0;
         }
-        if (buttons & PSP_BTN_SQUARE)
-            framesDue = 4;
 #ifdef PSP_TEST_FORCE_SKIP
         framesDue = 2;
 #endif
@@ -1091,9 +1417,14 @@ int main(int argc, char **argv)
             now = PspHw_Microseconds();
             timeDraw += now - timeStart;
             timeStart = now;
-            PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_SOUND);
-            AudioUpdate();
-            timeSound += PspHw_Microseconds() - timeStart;
+            // In turbo the sound engine runs once for every turbo-speed
+            // frames: the music keeps its tempo, and costs no more than usual
+            if (soundFrame++ % speed == 0)
+            {
+                PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_SOUND);
+                AudioUpdate();
+                timeSound += PspHw_Microseconds() - timeStart;
+            }
         }
 
         PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_PRESENT);

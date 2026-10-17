@@ -12,6 +12,7 @@
 #include <psprtc.h>
 #include <pspdebug.h>
 #include <pspiofilemgr.h>
+#include <pspsdk.h>
 
 #include "platform/psp_hw.h"
 
@@ -196,6 +197,37 @@ void PspHw_StartWatchdog(void)
         sceKernelStartThread(thread, 0, NULL);
 }
 
+// Shared with psp/kbuttons, which writes the buttons here from a kernel thread
+static struct
+{
+    volatile unsigned int run;
+    volatile unsigned int buttons;
+} sKernelButtons;
+static bool sKernelButtonsRunning;
+
+bool PspHw_StartKernelButtons(const char *path)
+{
+    SceKernelLMOption option;
+    SceUID module;
+    void *shared = &sKernelButtons;
+    int status = -1;
+
+    memset(&option, 0, sizeof(option));
+    option.size = sizeof(option);
+    option.mpidtext = PSP_MEMORY_PARTITION_KERNEL;
+    option.mpiddata = PSP_MEMORY_PARTITION_KERNEL;
+    option.access = 1;
+    sKernelButtons.run = 1;
+    module = sceKernelLoadModule(path, 0, &option);
+    if (module < 0 || sceKernelStartModule(module, sizeof(shared), &shared, &status, NULL) < 0 || status < 0)
+    {
+        sKernelButtons.run = 0;
+        return false;
+    }
+    sKernelButtonsRunning = true;
+    return true;
+}
+
 bool PspHw_Running(void)
 {
     return sRunning;
@@ -203,6 +235,12 @@ bool PspHw_Running(void)
 
 void PspHw_Exit(void)
 {
+    // Stop the kernel thread before the game's memory goes away
+    if (sKernelButtonsRunning)
+    {
+        sKernelButtons.run = 0;
+        sceKernelDelayThread(50 * 1000);
+    }
     sceKernelExitGame();
 }
 
@@ -213,6 +251,8 @@ uint32_t PspHw_ReadButtons(void)
 
     sceCtrlPeekBufferPositive(&pad, 1);
     buttons = pad.Buttons;
+    if (sKernelButtonsRunning)
+        buttons |= sKernelButtons.buttons & PSP_BTN_NOTE;
     // The stick works as the D-pad once it's past half way
     if (pad.Lx < 64)
         buttons |= PSP_BTN_LEFT;

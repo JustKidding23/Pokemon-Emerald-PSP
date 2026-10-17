@@ -66,3 +66,7 @@ __pycache__/
 !.claude/settings.json
 # The PSP test and profiling builds (BUILD_DIR=...)
 build-*/
+# The PSP menu art and music psp/make_art.sh makes from the game
+psp/ICON0.PNG
+psp/PIC1.PNG
+psp/SND0.AT3

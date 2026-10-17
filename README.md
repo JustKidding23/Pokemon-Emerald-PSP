@@ -5,7 +5,7 @@ Pokémon Emerald running natively on the Sony PSP (not emulated). This is a fork
 [fuddlesworth/pokeemerald-native](https://github.com/fuddlesworth/pokeemerald-native), the PC
 port of the [pret decompilation](https://github.com/pret/pokeemerald) that was originally made
 by [NTx86](https://github.com/NTx86/pokeemerald-sdl2pc). The PSP work is on the `psp` branch.
-It's made for a PSP 3001 with custom firmware and has so far been tested in PPSSPP.
+It's made for a PSP 3001 with custom firmware (tested on 6.61 PRO-C) and in PPSSPP.
 
 **Built with the use of AI:** the changes in this fork were made with Claude (Anthropic's AI
 assistant). AI-assisted code can contain mistakes, so review it before relying on it.
@@ -24,32 +24,49 @@ Build it as described in [INSTALL_PC.md](INSTALL_PC.md#psp), then copy the
 
 | PSP | GBA |
 |---|---|
-| Cross, Circle | A, B (the menu can swap them) |
+| Cross, Circle | A, B (the settings can swap them) |
 | D-pad or analog stick | D-pad |
 | L, R, Start, Select | L, R, Start, Select |
-| Square (hold) | Fast-forward, four times as fast |
-| Triangle | The save file and settings menu |
+| Square (hold) | Turbo, two or three times as fast |
+| Triangle | The save files |
+| The music note button | The settings (Select and Triangle where it can't be read) |
 
 ### Save files
 
-There are ten save files, `saves/slot1.sav` to `saves/slot10.sav` in the game's folder. Each
-is an ordinary 128 KB Emerald save, the same as an emulator writes, so you can bring one over
-by renaming it. The previous version of each save is kept as `slotN.sav.bak`. A
+There are three save files, `saves/slot1.sav` to `saves/slot3.sav` in the game's folder.
+Each is an ordinary 128 KB Emerald save, the same as an emulator writes, so you can bring
+one over by renaming it. The previous version of each save is kept as `slotN.sav.bak`. A
 `pokeemerald.sav` in the game's folder becomes file 1 if there are no save files yet.
 
-Triangle opens a menu that lists the files with the player's name, play time and badges.
-Pick a file with Cross to play it, copy it to another file or delete it. Playing another file
-starts the game over with it, which loses what you've done since you last saved, so the menu
-asks first. It waits until the game has finished saving if it's in the middle of it. The
-same menu sets the screen size, smoothing, which button is A, frameskip and a speed display.
-Those settings are kept in `settings.ini`.
+Triangle shows the files the way the game's CONTINUE screen does, with the player's name,
+play time and badges. Choose one to play it, copy it to another file or delete it. Playing
+another file starts the game over with it, which loses what you've done since you last
+saved, so it asks first. If the game is in the middle of saving, the switch waits until
+it's done.
+
+### Settings
+
+The music note button opens the settings: the screen size, smoothing, which button is A,
+frameskip, how fast turbo is and a speed display. They're kept in `settings.ini`. The note
+button can only be read by the kernel, so `kbuttons.prx`, next to the EBOOT, reads it for
+the game.
+
+Turbo runs the game two or three times as fast, but the music keeps its normal tempo.
 
 ### Speed
 
-The PSP draws the picture in software. In PPSSPP the overworld runs at a full 60 frames a
-second. Battles take longer to draw, so with frameskip on (the default) the game keeps its
-speed and draws fewer frames. "Show speed" in the menu shows how many frames a second the game
-runs and draws, and how many milliseconds a frame takes.
+The PSP draws the picture in software. On a PSP 3001 the game itself runs at full speed,
+and with frameskip on (the default) it draws every frame it has time for, which is about
+half of them in the overworld. "Show speed" in the settings shows how many frames a second
+the game runs and draws, and how many milliseconds a frame takes.
+
+### The PSP menu's art and music
+
+`psp/make_art.sh` makes the icon, background and music that the PSP's menu shows for the
+game, from the title screen of a PC build of this repository. It needs ImageMagick, ffmpeg
+and [atracdenc](https://github.com/dcherednik/atracdenc) for the music. `make psp` puts
+them in the EBOOT when they're there. They come from the game, so they aren't in the
+repository.
 
 ## PC and PS2
 

@@ -760,7 +760,9 @@ $(ROM): $(OBJS)
 	@mkdir -p $(PSP_GAME_DIR)
 	psp-prxgen $@ $(OBJ_DIR)/pokeemerald.prx
 	mksfoex -d MEMSIZE=1 '$(PSP_TITLE)' $(OBJ_DIR)/PARAM.SFO
-	pack-pbp $(PSP_GAME_DIR)/EBOOT.PBP $(OBJ_DIR)/PARAM.SFO $(or $(wildcard psp/ICON0.PNG),NULL) NULL NULL $(or $(wildcard psp/PIC1.PNG),NULL) NULL $(OBJ_DIR)/pokeemerald.prx NULL
+	$(MAKE) -C psp/kbuttons PATH="$(PATH)"
+	cp psp/kbuttons/kbuttons.prx $(PSP_GAME_DIR)/
+	pack-pbp $(PSP_GAME_DIR)/EBOOT.PBP $(OBJ_DIR)/PARAM.SFO $(or $(wildcard psp/ICON0.PNG),NULL) NULL NULL $(or $(wildcard psp/PIC1.PNG),NULL) $(or $(wildcard psp/SND0.AT3),NULL) $(OBJ_DIR)/pokeemerald.prx NULL
 else
 $(ROM): $(OBJS)
 	$(MODERNCC) $(CFLAGS) -Wl,--demangle $^ -static-libgcc -L$(SDL_DIR)/lib $(PLATFORM_LFLAGS) $(OS_LFLAGS) -o $@

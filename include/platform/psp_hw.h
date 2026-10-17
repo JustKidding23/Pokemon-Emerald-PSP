@@ -21,6 +21,8 @@
 #define PSP_BTN_CIRCLE   0x002000
 #define PSP_BTN_CROSS    0x004000
 #define PSP_BTN_SQUARE   0x008000
+// Only the kernel sees this one, through psp/kbuttons (see PspHw_StartKernelButtons)
+#define PSP_BTN_NOTE     0x800000
 
 enum
 {
@@ -63,6 +65,9 @@ void PspHw_SetDiag(int index, uint32_t value);
 void PspHw_StartTrace(const char *path);
 bool PspHw_Tracing(void);
 void PspHw_WriteTrace(void);
+// Loads psp/kbuttons, which reads the music note button for the game. Returns
+// whether it's running; it can't be in PPSSPP.
+bool PspHw_StartKernelButtons(const char *path);
 // False once the player has chosen to exit from the HOME menu
 bool PspHw_Running(void);
 void PspHw_Exit(void);
