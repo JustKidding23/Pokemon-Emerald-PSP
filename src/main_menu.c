@@ -4,6 +4,9 @@
 #include "constants/rgb.h"
 #include "constants/songs.h"
 #include "constants/trainers.h"
+#if defined(PORTABLE) && defined(__PSP__)
+#include "platform.h"
+#endif
 #include "data.h"
 #include "decompress.h"
 #include "event_data.h"
@@ -407,6 +410,12 @@ static const u16 sMainMenuBgPal[] = INCGFX_U16("graphics/interface/main_menu_bg.
 static const u16 sMainMenuTextPal[] = INCGFX_U16("graphics/interface/main_menu_text.pal", ".gbapal");
 
 static const u8 sTextColor_Headers[] = {TEXT_DYNAMIC_COLOR_1, TEXT_DYNAMIC_COLOR_2, TEXT_DYNAMIC_COLOR_3};
+#if defined(PORTABLE) && defined(__PSP__)
+// The PSP adds FILE SELECT after OPTION when there's no save or a save but no
+// Mystery Gift, in the windows the longer menus use for their next item
+static const u8 sText_MainMenuFileSelect[] = _("FILE SELECT");
+#define FILE_SELECT_ITEM(menuType) ((menuType) == HAS_NO_SAVED_GAME ? 2 : (menuType) == HAS_SAVED_GAME ? 3 : -1)
+#endif
 static const u8 sTextColor_MenuInfo[] = {TEXT_DYNAMIC_COLOR_1, TEXT_COLOR_WHITE, TEXT_DYNAMIC_COLOR_3};
 
 static const struct BgTemplate sMainMenuBgTemplates[] = {
@@ -688,6 +697,10 @@ static void Task_MainMenuCheckSaveFile(u8 taskId)
         sCurrItemAndOptionMenuCheck &= ~OPTION_MENU_FLAG;  // turn off the "returning from options menu" flag
         tCurrItem = sCurrItemAndOptionMenuCheck;
         tItemCount = tMenuType + 2;
+#if defined(PORTABLE) && defined(__PSP__)
+        if (FILE_SELECT_ITEM(tMenuType) >= 0)
+            tItemCount++;
+#endif
     }
 }
 
@@ -791,6 +804,13 @@ static void Task_DisplayMainMenu(u8 taskId)
                 CopyWindowToVram(1, COPYWIN_GFX);
                 DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[0], MAIN_MENU_BORDER_TILE);
                 DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[1], MAIN_MENU_BORDER_TILE);
+#if defined(PORTABLE) && defined(__PSP__)
+                FillWindowPixelBuffer(3, PIXEL_FILL(0xA));
+                AddTextPrinterParameterized3(3, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, sText_MainMenuFileSelect);
+                PutWindowTilemap(3);
+                CopyWindowToVram(3, COPYWIN_GFX);
+                DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[3], MAIN_MENU_BORDER_TILE);
+#endif
                 break;
             case HAS_SAVED_GAME:
                 FillWindowPixelBuffer(2, PIXEL_FILL(0xA));
@@ -809,6 +829,13 @@ static void Task_DisplayMainMenu(u8 taskId)
                 DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[2], MAIN_MENU_BORDER_TILE);
                 DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[3], MAIN_MENU_BORDER_TILE);
                 DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[4], MAIN_MENU_BORDER_TILE);
+#if defined(PORTABLE) && defined(__PSP__)
+                FillWindowPixelBuffer(5, PIXEL_FILL(0xA));
+                AddTextPrinterParameterized3(5, FONT_NORMAL, 0, 1, sTextColor_Headers, TEXT_SKIP_DRAW, sText_MainMenuFileSelect);
+                PutWindowTilemap(5);
+                CopyWindowToVram(5, COPYWIN_GFX);
+                DrawMainMenuWindowBorder(&sWindowTemplates_MainMenu[5], MAIN_MENU_BORDER_TILE);
+#endif
                 break;
             case HAS_MYSTERY_GIFT:
                 FillWindowPixelBuffer(2, PIXEL_FILL(0xA));
@@ -885,6 +912,15 @@ static bool8 HandleMainMenuInput(u8 taskId)
 {
     s16 *data = gTasks[taskId].data;
 
+#if defined(PORTABLE) && defined(__PSP__)
+    // The save file screen goes over the menu, which stays as it is
+    if (JOY_NEW(A_BUTTON) && tCurrItem == FILE_SELECT_ITEM(tMenuType))
+    {
+        PlaySE(SE_SELECT);
+        Platform_OpenFileSelect();
+        return FALSE;
+    }
+#endif
     if (JOY_NEW(A_BUTTON))
     {
         PlaySE(SE_SELECT);
@@ -1184,6 +1220,11 @@ static void HighlightSelectedMainMenuItem(u8 menuType, u8 selectedMenuItem, s16 
                 case 1:
                     SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(1));
                     break;
+#if defined(PORTABLE) && defined(__PSP__)
+                case 2:
+                    SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(3));
+                    break;
+#endif
             }
             break;
         case HAS_SAVED_GAME:
@@ -1199,6 +1240,11 @@ static void HighlightSelectedMainMenuItem(u8 menuType, u8 selectedMenuItem, s16 
                 case 2:
                     SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(4));
                     break;
+#if defined(PORTABLE) && defined(__PSP__)
+                case 3:
+                    SetGpuReg(REG_OFFSET_WIN0V, MENU_WIN_VCOORDS(5));
+                    break;
+#endif
             }
             break;
         case HAS_MYSTERY_GIFT:

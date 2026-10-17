@@ -46,6 +46,9 @@
 #include "constants/battle_frontier.h"
 #include "constants/rgb.h"
 #include "constants/songs.h"
+#if defined(PORTABLE) && defined(__PSP__)
+#include "platform.h"
+#endif
 
 // Menu actions
 enum
@@ -62,7 +65,10 @@ enum
     MENU_ACTION_PLAYER_LINK,
     MENU_ACTION_REST_FRONTIER,
     MENU_ACTION_RETIRE_FRONTIER,
-    MENU_ACTION_PYRAMID_BAG
+    MENU_ACTION_PYRAMID_BAG,
+#if defined(PORTABLE) && defined(__PSP__)
+    MENU_ACTION_FILE_SELECT,
+#endif
 };
 
 // Save status
@@ -98,6 +104,16 @@ static bool8 StartMenuPokeNavCallback(void);
 static bool8 StartMenuPlayerNameCallback(void);
 static bool8 StartMenuSaveCallback(void);
 static bool8 StartMenuOptionCallback(void);
+#if defined(PORTABLE) && defined(__PSP__)
+static bool8 StartMenuFileSelectCallback(void);
+static const u8 sText_MenuFileSelect[] = _("FILE SELECT");
+
+// The PSP's start menu is wider, for FILE SELECT, and with nine items they're
+// moved up to fill the window, which can't be taller than the screen
+#define START_MENU_ITEMS_TOP (sNumStartMenuActions > 8 ? 1 : 9)
+#else
+#define START_MENU_ITEMS_TOP 9
+#endif
 static bool8 StartMenuExitCallback(void);
 static bool8 StartMenuSafariZoneRetireCallback(void);
 static bool8 StartMenuLinkModePlayerNameCallback(void);
@@ -193,7 +209,10 @@ static const struct MenuAction sStartMenuItems[] =
     [MENU_ACTION_PLAYER_LINK]     = {gText_MenuPlayer,  {.u8_void = StartMenuLinkModePlayerNameCallback}},
     [MENU_ACTION_REST_FRONTIER]   = {gText_MenuRest,    {.u8_void = StartMenuSaveCallback}},
     [MENU_ACTION_RETIRE_FRONTIER] = {gText_MenuRetire,  {.u8_void = StartMenuBattlePyramidRetireCallback}},
-    [MENU_ACTION_PYRAMID_BAG]     = {gText_MenuBag,     {.u8_void = StartMenuBattlePyramidBagCallback}}
+    [MENU_ACTION_PYRAMID_BAG]     = {gText_MenuBag,     {.u8_void = StartMenuBattlePyramidBagCallback}},
+#if defined(PORTABLE) && defined(__PSP__)
+    [MENU_ACTION_FILE_SELECT]     = {sText_MenuFileSelect, {.u8_void = StartMenuFileSelectCallback}},
+#endif
 };
 
 static const struct BgTemplate sBgTemplates_LinkBattleSave[] =
@@ -332,6 +351,9 @@ static void BuildNormalStartMenu(void)
 
     AddStartMenuAction(MENU_ACTION_PLAYER);
     AddStartMenuAction(MENU_ACTION_SAVE);
+#if defined(PORTABLE) && defined(__PSP__)
+    AddStartMenuAction(MENU_ACTION_FILE_SELECT);
+#endif
     AddStartMenuAction(MENU_ACTION_OPTION);
     AddStartMenuAction(MENU_ACTION_EXIT);
 }
@@ -454,12 +476,12 @@ static bool32 PrintStartMenuActions(s8 *pIndex, u32 count)
     {
         if (sStartMenuItems[sCurrentStartMenuActions[index]].func.u8_void == StartMenuPlayerNameCallback)
         {
-            PrintPlayerNameOnWindow(GetStartMenuWindowId(), sStartMenuItems[sCurrentStartMenuActions[index]].text, 8, (index << 4) + 9);
+            PrintPlayerNameOnWindow(GetStartMenuWindowId(), sStartMenuItems[sCurrentStartMenuActions[index]].text, 8, (index << 4) + START_MENU_ITEMS_TOP);
         }
         else
         {
             StringExpandPlaceholders(gStringVar4, sStartMenuItems[sCurrentStartMenuActions[index]].text);
-            AddTextPrinterParameterized(GetStartMenuWindowId(), FONT_NORMAL, gStringVar4, 8, (index << 4) + 9, TEXT_SKIP_DRAW, NULL);
+            AddTextPrinterParameterized(GetStartMenuWindowId(), FONT_NORMAL, gStringVar4, 8, (index << 4) + START_MENU_ITEMS_TOP, TEXT_SKIP_DRAW, NULL);
         }
 
         index++;
@@ -508,7 +530,7 @@ static bool32 InitStartMenuStep(void)
             sInitStartMenuData[0]++;
         break;
     case 5:
-        sStartMenuCursorPos = InitMenuNormal(GetStartMenuWindowId(), FONT_NORMAL, 0, 9, 16, sNumStartMenuActions, sStartMenuCursorPos);
+        sStartMenuCursorPos = InitMenuNormal(GetStartMenuWindowId(), FONT_NORMAL, 0, START_MENU_ITEMS_TOP, 16, sNumStartMenuActions, sStartMenuCursorPos);
         CopyWindowToVram(GetStartMenuWindowId(), COPYWIN_MAP);
         return TRUE;
     }
@@ -616,6 +638,9 @@ static bool8 HandleStartMenuInput(void)
         gMenuCallback = sStartMenuItems[sCurrentStartMenuActions[sStartMenuCursorPos]].func.u8_void;
 
         if (gMenuCallback != StartMenuSaveCallback
+#if defined(PORTABLE) && defined(__PSP__)
+            && gMenuCallback != StartMenuFileSelectCallback
+#endif
             && gMenuCallback != StartMenuExitCallback
             && gMenuCallback != StartMenuSafariZoneRetireCallback
             && gMenuCallback != StartMenuBattlePyramidRetireCallback)
@@ -743,6 +768,16 @@ static bool8 StartMenuOptionCallback(void)
 
     return FALSE;
 }
+
+#if defined(PORTABLE) && defined(__PSP__)
+// The save file screen goes over the menu, which stays open behind it
+static bool8 StartMenuFileSelectCallback(void)
+{
+    Platform_OpenFileSelect();
+    gMenuCallback = HandleStartMenuInput;
+    return FALSE;
+}
+#endif
 
 static bool8 StartMenuExitCallback(void)
 {

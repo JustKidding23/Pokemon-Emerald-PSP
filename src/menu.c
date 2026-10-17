@@ -490,7 +490,13 @@ u8 GetPlayerTextSpeedDelay(void)
 u8 AddStartMenuWindow(u8 numActions)
 {
     if (sStartMenuWindowId == WINDOW_NONE)
+#if defined(PORTABLE) && defined(__PSP__)
+        // Two tiles wider for FILE SELECT, and without the padding above and
+        // below the items when there are nine (see START_MENU_ITEMS_TOP)
+        sStartMenuWindowId = AddWindowParameterized(0, 20, 1, 9, (numActions * 2) + (numActions > 8 ? 0 : 2), 15, 0x139);
+#else
         sStartMenuWindowId = AddWindowParameterized(0, 22, 1, 7, (numActions * 2) + 2, 15, 0x139);
+#endif
     return sStartMenuWindowId;
 }
 

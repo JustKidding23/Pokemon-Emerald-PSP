@@ -359,6 +359,10 @@ u16 Platform_GetKeyInput(void)
     return sKeys;
 }
 
+// Buttons held when a menu closed, which the game doesn't get until they're
+// let go, so that closing it doesn't press them in the game too
+static u32 sMaskedButtons;
+
 static u16 MapButtons(u32 buttons)
 {
     u16 keys = 0;
@@ -616,7 +620,8 @@ static void DrawSettings(void)
     PspHw_Print(2, 30, COLOR_GRAY, "Left and Right: change   Circle or the note button: back");
 }
 
-// The save file screen, on Triangle. It's drawn like the game's CONTINUE
+// The save file screen, from FILE SELECT in the start menu and the main menu
+// (see Platform_OpenFileSelect). It's drawn like the game's CONTINUE
 // screen (see main_menu.c), with its font, window frame and colors, into an
 // image of the GBA's size.
 #define SAVES_BG_COLOR    RGB(17, 18, 31) // graphics/interface/main_menu_bg.pal
@@ -969,6 +974,11 @@ static void OpenSaves(void)
     }
 }
 
+void Platform_OpenFileSelect(void)
+{
+    OpenSaves();
+}
+
 static void SavesConfirmed(void)
 {
     char text[40];
@@ -1270,6 +1280,7 @@ int main(int argc, char **argv)
     // Where the time goes, in microseconds a second
     u64 timeGame = 0, timeDraw = 0, timeSound = 0, timeStart;
     int speed, lastSpeed = 1;
+    bool menuWasOpen;
     u32 soundFrame = 0;
     char speedText[80] = "";
 
@@ -1320,48 +1331,27 @@ int main(int argc, char **argv)
         held = buttons;
         PspHw_Heartbeat();
 
-        if (sSaves.open || sSettingsMenu.open)
-        {
-            PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_MENU);
-            if (sSaves.open)
-            {
-                UpdateSaves(pressed);
-                if (sSaves.open)
-                    DrawSavesScreen();
-                PspHw_DrawGame(sSaves.open ? sSavesImage : image, sSettings.scale, sSettings.filter, false);
-            }
-            else
-            {
-                UpdateSettings(pressed);
-                PspHw_DrawGame(image, sSettings.scale, sSettings.filter, sSettingsMenu.open);
-                if (sSettingsMenu.open)
-                    DrawSettings();
-            }
-            PspHw_Present();
-            // The game was stopped, so its clock starts again from here
-            clockStart = PspHw_Microseconds();
-            framesRun = 0;
-            continue;
-        }
+        // The menus go over the game, which keeps running without the buttons.
         // The note button opens the settings. Where it can't be read, like in
-        // PPSSPP, Select and Triangle do. Triangle opens the save files.
-        if ((pressed & PSP_BTN_NOTE) || ((pressed & PSP_BTN_TRIANGLE) && (buttons & PSP_BTN_SELECT)))
-        {
+        // PPSSPP, Select and Triangle do.
+        menuWasOpen = sSaves.open || sSettingsMenu.open;
+        if (sSaves.open)
+            UpdateSaves(pressed);
+        else if (sSettingsMenu.open)
+            UpdateSettings(pressed);
+        else if ((pressed & PSP_BTN_NOTE) || ((pressed & PSP_BTN_TRIANGLE) && (buttons & PSP_BTN_SELECT)))
             OpenSettings();
-            continue;
-        }
-        if (pressed & PSP_BTN_TRIANGLE)
-        {
-            OpenSaves();
-            continue;
-        }
+        if (menuWasOpen && !sSaves.open && !sSettingsMenu.open)
+            sMaskedButtons = buttons;
+        sMaskedButtons &= buttons;
+        menuWasOpen |= sSaves.open || sSettingsMenu.open;
 
         // How many frames the game should have run by now. It runs one a
         // display frame, or with Square held two or three (the turbo speed),
         // and catches up when it falls behind by running frames without
         // drawing them.
         now = PspHw_Microseconds();
-        speed = (buttons & PSP_BTN_SQUARE) ? sSettings.turboSpeed : 1;
+        speed = ((buttons & PSP_BTN_SQUARE) && !menuWasOpen) ? sSettings.turboSpeed : 1;
         if (speed != lastSpeed)
         {
             clockStart = now;
@@ -1381,7 +1371,7 @@ int main(int argc, char **argv)
 #ifdef PSP_TEST_FORCE_SKIP
         framesDue = 2;
 #endif
-        sKeys = MapButtons(buttons);
+        sKeys = menuWasOpen ? 0 : MapButtons(buttons & ~sMaskedButtons);
 
         for (int i = 0; i < framesDue; i++)
         {
@@ -1428,7 +1418,17 @@ int main(int argc, char **argv)
         }
 
         PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_PRESENT);
-        PspHw_DrawGame(image, sSettings.scale, sSettings.filter, false);
+        if (sSaves.open)
+        {
+            DrawSavesScreen();
+            PspHw_DrawGame(sSavesImage, sSettings.scale, sSettings.filter, false);
+        }
+        else
+        {
+            PspHw_DrawGame(image, sSettings.scale, sSettings.filter, sSettingsMenu.open);
+            if (sSettingsMenu.open)
+                DrawSettings();
+        }
         if (sSettings.showSpeed)
         {
             now = PspHw_Microseconds();
