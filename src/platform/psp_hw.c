@@ -84,6 +84,118 @@ void PspHw_Init(void)
     pspDebugScreenEnableBackColor(0);
 }
 
+static volatile uint32_t sDiag[PSP_DIAG_COUNT];
+static volatile uint32_t sHeartbeat;
+
+void PspHw_Heartbeat(void)
+{
+    sHeartbeat++;
+}
+
+// The trace: with it on, every new step of a frame is written straight to a
+// file on the memory stick, so after a freeze it shows what the game was
+// doing. It's slow, so it's only for finding crashes.
+static SceUID sTraceFile = -1;
+static uint32_t sTraceCount;
+
+void PspHw_StartTrace(const char *path)
+{
+    uint32_t empty[2 + PSP_DIAG_COUNT] = {0};
+
+    // The file gets its full size and is closed first, because a file's size
+    // only reaches the memory stick when it's closed, and the game never
+    // closes it. Then each record is written over that one.
+    if (!PspHw_WriteFile(path, empty, sizeof(empty)))
+        return;
+    sTraceFile = sceIoOpen(path, PSP_O_WRONLY, 0777);
+}
+
+bool PspHw_Tracing(void)
+{
+    return sTraceFile >= 0;
+}
+
+void PspHw_WriteTrace(void)
+{
+    uint32_t record[2 + PSP_DIAG_COUNT];
+
+    if (sTraceFile < 0)
+        return;
+    record[0] = 0x45435254; // "TRCE"
+    record[1] = ++sTraceCount;
+    for (int i = 0; i < PSP_DIAG_COUNT; i++)
+        record[2 + i] = sDiag[i];
+    // Over the same record each time, so the file never grows
+    sceIoLseek32(sTraceFile, 0, PSP_SEEK_SET);
+    sceIoWrite(sTraceFile, record, sizeof(record));
+}
+
+void PspHw_SetDiag(int index, uint32_t value)
+{
+    sDiag[index] = value;
+    if (index == PSP_DIAG_STEP)
+        PspHw_WriteTrace();
+}
+
+static void ShowHang(void)
+{
+    static const char *const sSteps[] = {
+        "?", "game (MainLoop)", "drawing", "DMAs and VBlank", "sound engine", "GU and display",
+        "menu", "writing the save",
+    };
+    uint32_t step = sDiag[PSP_DIAG_STEP];
+
+    pspDebugScreenInit();
+    // Dark blue, as the colors are ABGR
+    pspDebugScreenSetBackColor(0xFF804000);
+    pspDebugScreenSetTextColor(0xFFFFFFFF);
+    pspDebugScreenClear();
+    pspDebugScreenPrintf("Pokemon Emerald PSP stopped responding.\n");
+    pspDebugScreenPrintf("Please photograph this screen.\n\n");
+    pspDebugScreenPrintf("Stuck in: %s\n", step < sizeof(sSteps) / sizeof(sSteps[0]) ? sSteps[step] : "?");
+    pspDebugScreenPrintf("Frame %u\n\n", (unsigned)sDiag[PSP_DIAG_FRAME]);
+    pspDebugScreenPrintf("running   %08X\n", (unsigned)sDiag[PSP_DIAG_CALL]);
+    pspDebugScreenPrintf("callback1 %08X\ncallback2 %08X\nvblank    %08X\n\nTasks:\n",
+                         (unsigned)sDiag[PSP_DIAG_CALLBACK1], (unsigned)sDiag[PSP_DIAG_CALLBACK2],
+                         (unsigned)sDiag[PSP_DIAG_VBLANK]);
+    for (int i = 0; i < 16; i++)
+    {
+        if (sDiag[PSP_DIAG_TASKS + i] != 0)
+            pspDebugScreenPrintf("%08X%s", (unsigned)sDiag[PSP_DIAG_TASKS + i], i % 4 == 3 ? "\n" : "  ");
+    }
+    pspDebugScreenPrintf("\n\nHold the power switch up to turn the PSP off.\n");
+}
+
+static int WatchdogThread(SceSize args, void *argp)
+{
+    uint32_t last = sHeartbeat;
+    int stuckFor = 0;
+
+    while (sRunning)
+    {
+        sceKernelDelayThread(500 * 1000);
+        if (sHeartbeat != last)
+        {
+            last = sHeartbeat;
+            stuckFor = 0;
+        }
+        else if (++stuckFor == 10)
+        {
+            ShowHang();
+        }
+    }
+    return 0;
+}
+
+void PspHw_StartWatchdog(void)
+{
+    // Above everything else, so it runs even if the game's thread never waits
+    int thread = sceKernelCreateThread("watchdog", WatchdogThread, 0x10, 0x4000, PSP_THREAD_ATTR_USER, NULL);
+
+    if (thread >= 0)
+        sceKernelStartThread(thread, 0, NULL);
+}
+
 bool PspHw_Running(void)
 {
     return sRunning;

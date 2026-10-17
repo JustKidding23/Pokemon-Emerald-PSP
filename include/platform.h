@@ -17,4 +17,11 @@ void Platform_GetTime(struct SiiRtcInfo *rtc);
 void Platform_SetTime(struct SiiRtcInfo *rtc);
 void Platform_SetAlarm(u8 *alarmData);
 
+// The PSP's trace (see psp.c) notes each task and callback before it runs
+#ifdef __PSP__
+void Platform_TraceCall(const void *func);
+#else
+#define Platform_TraceCall(func) ((void)0)
+#endif
+
 #endif

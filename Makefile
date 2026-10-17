@@ -195,12 +195,30 @@ ifeq ($(PORTABLE),1)
     PSPSDK ?= $(PSPDEV)/psp/sdk
     export PATH := $(PSPDEV)/bin:$(PATH)
     OS_CFLAGS := -march=allegrex -mhard-float -msingle-float -G0
+    # GCC merges byte-by-byte reads and writes, like T1_READ_32 on a script,
+    # into lwl/lwr and swl/swr pairs, and schedules other instructions between
+    # the two halves. On a PSP 3001 such a split lwl/lwr read the aligned word
+    # instead (PPSSPP reads the right bytes), which crashed the game when it
+    # called a field effect script's function after leaving the truck.
+    OS_CFLAGS += -fdisable-tree-bswap -fno-store-merging
+    # The vectorizer does the same to copy two 16-bit values as one word, and
+    # the PSP has no vector unit it could use anyway
+    OS_CFLAGS += -fno-tree-vectorize
     CONSOLE_ASFLAGS := -EL -mabi=eabi -march=allegrex -mhard-float -msingle-float
     PLATFORM_INCLUDES += -D__PSP__ -DPSP -D_PSP_FW_VERSION=600 -I$(PSPSDK)/include
     BUILD_FEXTENSION := .elf
     # PSP_TEST=1 builds the emulator tests' version (see TestButtons in psp.c)
     ifeq ($(PSP_TEST),1)
-      PLATFORM_INCLUDES += -DPSP_TEST
+      PLATFORM_INCLUDES += -DPSP_TEST $(PSP_TEST_FLAGS)
+      # PSP_UBSAN=1 reports misaligned accesses in PPSSPP (see psp_ubsan.c)
+      ifeq ($(PSP_UBSAN),1)
+        PLATFORM_INCLUDES += -DPSP_UBSAN
+        OS_CFLAGS += -fsanitize=alignment
+        # psp-gcc links libubsan, which psp_ubsan.c takes the place of
+        PSP_UBSAN_DIR := $(BUILD_DIR)/ubsan
+        $(shell mkdir -p $(PSP_UBSAN_DIR) && $(PSPDEV)/bin/psp-ar rcs $(PSP_UBSAN_DIR)/libubsan.a)
+        PLATFORM_LFLAGS += -L$(PSP_UBSAN_DIR)
+      endif
     endif
     # MIPS as pads .int and .short to their size, see the PS2
     ASM_PSEUDO_OP_CONV := cat
@@ -734,13 +752,15 @@ else ifeq ($(TARGET_OS),PSP)
 # EBOOT.PBP, in build/psp32/PSP/GAME/EMERALD_PSP/ with the files that go next to it
 PSP_TITLE ?= Pokemon Emerald PSP
 PSP_GAME_DIR := $(OBJ_DIR)/PSP/GAME/EMERALD_PSP
+# The game is a PRX, like pspsdk's BUILD_PRX=1 makes, which PSPLink can also
+# start over USB: build/psp32/pokeemerald.prx
 $(ROM): $(OBJS)
-	$(MODERNCC) $(CFLAGS) -Wl,--demangle $^ $(PLATFORM_LFLAGS) $(OS_LFLAGS) -Wl,-zmax-page-size=128 -o $@
+	$(MODERNCC) $(CFLAGS) -specs=$(PSPSDK)/lib/prxspecs -Wl,-q,-T$(PSPSDK)/lib/linkfile.prx -Wl,--demangle $^ $(PSPSDK)/lib/prxexports.o $(PLATFORM_LFLAGS) $(OS_LFLAGS) -Wl,-zmax-page-size=128 -o $@
 	psp-fixup-imports $@
 	@mkdir -p $(PSP_GAME_DIR)
-	psp-strip $@ -o $(OBJ_DIR)/pokeemerald_strip.elf
+	psp-prxgen $@ $(OBJ_DIR)/pokeemerald.prx
 	mksfoex -d MEMSIZE=1 '$(PSP_TITLE)' $(OBJ_DIR)/PARAM.SFO
-	pack-pbp $(PSP_GAME_DIR)/EBOOT.PBP $(OBJ_DIR)/PARAM.SFO $(or $(wildcard psp/ICON0.PNG),NULL) NULL NULL $(or $(wildcard psp/PIC1.PNG),NULL) NULL $(OBJ_DIR)/pokeemerald_strip.elf NULL
+	pack-pbp $(PSP_GAME_DIR)/EBOOT.PBP $(OBJ_DIR)/PARAM.SFO $(or $(wildcard psp/ICON0.PNG),NULL) NULL NULL $(or $(wildcard psp/PIC1.PNG),NULL) NULL $(OBJ_DIR)/pokeemerald.prx NULL
 else
 $(ROM): $(OBJS)
 	$(MODERNCC) $(CFLAGS) -Wl,--demangle $^ -static-libgcc -L$(SDL_DIR)/lib $(PLATFORM_LFLAGS) $(OS_LFLAGS) -o $@

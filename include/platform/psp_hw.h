@@ -33,6 +33,36 @@ enum
 
 // Sets the CPU clock, the HOME button's exit callback, the controller and GU
 void PspHw_Init(void);
+// The watchdog: if the game stops calling PspHw_Heartbeat for 5 seconds, a
+// thread shows what it was doing, from what was given to PspHw_SetDiag
+enum
+{
+    PSP_DIAG_STEP,       // one of the PSP_STEP values
+    PSP_DIAG_FRAME,
+    PSP_DIAG_CALLBACK1,
+    PSP_DIAG_CALLBACK2,
+    PSP_DIAG_VBLANK,
+    PSP_DIAG_TASKS,      // and the next 15: the active tasks' functions
+    PSP_DIAG_CALL = PSP_DIAG_TASKS + 16, // the task or callback running
+    PSP_DIAG_COUNT,
+};
+enum
+{
+    PSP_STEP_GAME = 1,   // MainLoop
+    PSP_STEP_DRAW,       // DrawFrame or SkipFrame
+    PSP_STEP_VBLANK,     // DMAs and the VBlank interrupt
+    PSP_STEP_SOUND,      // the sound engine
+    PSP_STEP_PRESENT,    // the GU, waiting for the display
+    PSP_STEP_MENU,
+    PSP_STEP_SAVE,       // writing to the memory stick
+};
+void PspHw_StartWatchdog(void);
+void PspHw_Heartbeat(void);
+void PspHw_SetDiag(int index, uint32_t value);
+// Writes the diagnostics to path at every new step (see psp_hw.c)
+void PspHw_StartTrace(const char *path);
+bool PspHw_Tracing(void);
+void PspHw_WriteTrace(void);
 // False once the player has chosen to exit from the HOME menu
 bool PspHw_Running(void);
 void PspHw_Exit(void);

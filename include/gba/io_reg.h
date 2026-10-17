@@ -4,7 +4,10 @@
 #ifndef PORTABLE
 #define REG_BASE 0x4000000 // I/O register base address
 #else
-extern unsigned char REG_BASE[];
+// Aligned like it's defined (system.c), so that 32-bit registers are read
+// with one load, instead of the unaligned lwl/lwr pair that GCC uses for an
+// array it doesn't know the alignment of
+extern unsigned char REG_BASE[0x400] __attribute__ ((aligned (4)));
 #endif
 
 // I/O register offsets

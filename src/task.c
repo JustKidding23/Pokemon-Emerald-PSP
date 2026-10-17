@@ -1,5 +1,8 @@
 #include "global.h"
 #include "task.h"
+#ifdef PORTABLE
+#include "platform.h"
+#endif
 
 COMMON_DATA struct Task gTasks[NUM_TASKS] = {0};
 
@@ -115,6 +118,9 @@ void RunTasks(void)
     {
         do
         {
+#ifdef PORTABLE
+            Platform_TraceCall(gTasks[taskId].func);
+#endif
             gTasks[taskId].func(taskId);
             taskId = gTasks[taskId].next;
         } while (taskId != TAIL_SENTINEL);

@@ -209,10 +209,20 @@ static void InitMainCallbacks(void)
 static void CallCallbacks(void)
 {
     if (gMain.callback1)
+    {
+#ifdef PORTABLE
+        Platform_TraceCall(gMain.callback1);
+#endif
         gMain.callback1();
+    }
 
     if (gMain.callback2)
+    {
+#ifdef PORTABLE
+        Platform_TraceCall(gMain.callback2);
+#endif
         gMain.callback2();
+    }
 }
 
 void SetMainCallback2(MainCallback callback)

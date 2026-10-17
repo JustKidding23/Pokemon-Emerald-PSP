@@ -10,6 +10,7 @@
 #include "platform.h"
 #include "rtc.h"
 #include "save.h"
+#include "task.h"
 #include "constants/characters.h"
 #include "constants/flags.h"
 #include "gba/flash_internal.h"
@@ -41,6 +42,7 @@ static struct
     bool circleIsA;
     int frameskip;
     bool showSpeed;
+    bool trace;
 } sSettings = {
     .slot = 1,
     .scale = PSP_SCALE_FIT,
@@ -55,6 +57,7 @@ static char sBaseDir[256];
 static u16 sKeys;
 static int sPendingSlot;
 static char sStatus[PSP_TEXT_COLUMNS + 1];
+static u32 sTotalFrames;
 static u32 sStatusFrames;
 
 struct SaveFileInfo
@@ -121,13 +124,15 @@ static void LoadSettings(void)
             sSettings.frameskip = ClampSetting(value, 0, FRAMESKIP_COUNT - 1, FRAMESKIP_AUTO);
         else if (strcmp(name, "show_speed") == 0)
             sSettings.showSpeed = value != 0;
+        else if (strcmp(name, "trace") == 0)
+            sSettings.trace = value != 0;
     }
 }
 
 static void StoreSettings(void)
 {
     char path[300];
-    char text[512];
+    char text[768];
     int length;
 
     SettingsPath(path, sizeof(path));
@@ -143,9 +148,11 @@ static void StoreSettings(void)
                       "circle_is_a = %d\n"
                       "# 0 skips drawing frames when the PSP falls behind, 1 slows the game down instead\n"
                       "frameskip = %d\n"
-                      "show_speed = %d\n",
+                      "show_speed = %d\n"
+                      "# 1 writes what the game is doing to trace.bin all the time, to find crashes (slow)\n"
+                      "trace = %d\n",
                       NUM_SLOTS, sSettings.slot, sSettings.scale, sSettings.filter, sSettings.circleIsA,
-                      sSettings.frameskip, sSettings.showSpeed);
+                      sSettings.frameskip, sSettings.showSpeed, sSettings.trace);
     PspHw_WriteFile(path, text, length);
 }
 
@@ -264,6 +271,8 @@ static void ReadSaveFile(int slot)
 void Platform_StoreSaveFile(void)
 {
     char path[300];
+
+    PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_SAVE);
 
     SlotPath(sSettings.slot, path, sizeof(path));
     if (!PspHw_WriteFileSafely(path, FLASH_BASE, SAVE_SIZE))
@@ -903,6 +912,34 @@ static u32 TestButtons(bool *done, bool *shot)
 }
 #endif
 
+// What the watchdog shows if the game stops responding
+static void SetGameDiag(u32 frame)
+{
+    int n = 0;
+
+    PspHw_SetDiag(PSP_DIAG_FRAME, frame);
+    PspHw_SetDiag(PSP_DIAG_CALL, 0);
+    PspHw_SetDiag(PSP_DIAG_CALLBACK1, (uintptr_t)gMain.callback1);
+    PspHw_SetDiag(PSP_DIAG_CALLBACK2, (uintptr_t)gMain.callback2);
+    PspHw_SetDiag(PSP_DIAG_VBLANK, (uintptr_t)gMain.vblankCallback);
+    for (int i = 0; i < NUM_TASKS && n < 16; i++)
+    {
+        if (gTasks[i].isActive)
+            PspHw_SetDiag(PSP_DIAG_TASKS + n++, (uintptr_t)gTasks[i].func);
+    }
+    while (n < 16)
+        PspHw_SetDiag(PSP_DIAG_TASKS + n++, 0);
+    // Last, so the trace's record has all of the above
+    PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_GAME);
+}
+
+void Platform_TraceCall(const void *func)
+{
+    PspHw_SetDiag(PSP_DIAG_CALL, (uintptr_t)func);
+    if (PspHw_Tracing())
+        PspHw_WriteTrace();
+}
+
 static void FindBaseDir(const char *exePath)
 {
     const char *slash = exePath != NULL ? strrchr(exePath, '/') : NULL;
@@ -935,6 +972,11 @@ int main(int argc, char **argv)
     snprintf(path, sizeof(path), "%ssaves", sBaseDir);
     PspHw_MakeDir(path);
     LoadSettings();
+    if (sSettings.trace)
+    {
+        snprintf(path, sizeof(path), "%strace.bin", sBaseDir);
+        PspHw_StartTrace(path);
+    }
     AdoptOldSave();
     ReadSaveFile(sSettings.slot);
     sClock.status = SIIRTCINFO_24HOUR;
@@ -942,6 +984,7 @@ int main(int argc, char **argv)
 
     cgb_audio_init(AUDIO_SAMPLE_RATE);
     PspHw_AudioInit(AUDIO_SAMPLE_RATE);
+    PspHw_StartWatchdog();
     AgbMain();
 
     clockStart = speedStart = PspHw_Microseconds();
@@ -967,9 +1010,11 @@ int main(int argc, char **argv)
         int framesDue;
 
         held = buttons;
+        PspHw_Heartbeat();
 
         if (sMenu.open)
         {
+            PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_MENU);
             UpdateMenu(pressed);
             PspHw_DrawGame(image, sSettings.scale, sSettings.filter, sMenu.open);
             if (sMenu.open)
@@ -1007,6 +1052,9 @@ int main(int argc, char **argv)
         }
         if (buttons & PSP_BTN_SQUARE)
             framesDue = 4;
+#ifdef PSP_TEST_FORCE_SKIP
+        framesDue = 2;
+#endif
         sKeys = MapButtons(buttons);
 
         for (int i = 0; i < framesDue; i++)
@@ -1016,6 +1064,7 @@ int main(int argc, char **argv)
             framesRun++;
             speedFrames++;
             timeStart = PspHw_Microseconds();
+            SetGameDiag(++sTotalFrames);
             if (!RunMainLoop())
             {
                 // Soft reset: drop the old sound, and start the next frame with MainLoop
@@ -1025,6 +1074,7 @@ int main(int argc, char **argv)
             now = PspHw_Microseconds();
             timeGame += now - timeStart;
             timeStart = now;
+            PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_DRAW);
             if (i == framesDue - 1)
             {
                 memset(image, 0, sizeof(image));
@@ -1036,14 +1086,17 @@ int main(int argc, char **argv)
                 SkipFrame();
             }
             REG_VCOUNT = 161;
+            PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_VBLANK);
             RunDMAsAndVBlank();
             now = PspHw_Microseconds();
             timeDraw += now - timeStart;
             timeStart = now;
+            PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_SOUND);
             AudioUpdate();
             timeSound += PspHw_Microseconds() - timeStart;
         }
 
+        PspHw_SetDiag(PSP_DIAG_STEP, PSP_STEP_PRESENT);
         PspHw_DrawGame(image, sSettings.scale, sSettings.filter, false);
         if (sSettings.showSpeed)
         {
