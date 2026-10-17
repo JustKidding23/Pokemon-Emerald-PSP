@@ -62,6 +62,9 @@ static u32 sTestFrame;
 static u64 sTestAudioHash;
 static FILE *sTestAudio;
 static FILE *sTestState;
+// DISPCNT bits left out of the test mode's pictures, like the title screen's
+// logo for psp/make_art.sh. The game itself still sees them.
+static u16 sTestHiddenLayers;
 
 extern void AgbMain(void);
 
@@ -669,6 +672,10 @@ static bool ParseArgs(int argc, char **argv)
         {
             sTestShotEvery = strtoul(value, NULL, 10);
         }
+        else if (strcmp(arg, "--test-hide-layers") == 0)
+        {
+            sTestHiddenLayers = strtoul(value, NULL, 0);
+        }
         else if (strcmp(arg, "--test-time") == 0)
         {
             sTestClockBase = strtoll(value, NULL, 10);
@@ -834,7 +841,18 @@ static int RunTestMode(void)
         ENTER_VBLANK();
         ranFrame = RunMainLoop();
         memset(image, 0, sizeof(image));
-        DrawFrame(image);
+        if (sTestHiddenLayers != 0)
+        {
+            u16 dispcnt = REG_DISPCNT;
+
+            REG_DISPCNT &= ~sTestHiddenLayers;
+            DrawFrame(image);
+            REG_DISPCNT = dispcnt;
+        }
+        else
+        {
+            DrawFrame(image);
+        }
         REG_VCOUNT = 161;
         sTestAudioHash = 0xCBF29CE484222325ull;
         // After a soft reset, the next frame starts with MainLoop, like at startup

@@ -1,8 +1,8 @@
 #!/bin/bash
 # Makes the PSP menu's art and music for the EBOOT from the game itself:
-# psp/ICON0.PNG (144x80), the logo from the end of the intro, psp/PIC1.PNG
-# (480x272), Rayquaza from the intro, and psp/SND0.AT3 from the title
-# screen's music. They're made from the game, so don't share them;
+# psp/ICON0.PNG (144x80), the logo from the end of the intro, and
+# psp/PIC1.PNG (480x272) and psp/SND0.AT3, the title screen's Rayquaza
+# without the logo, and its music. They're made from the game, so don't share them;
 # .gitignore leaves them out. `make psp` puts them in the EBOOT if they're here.
 #
 # usage: psp/make_art.sh [PC_BINARY] [ATRACDENC]
@@ -19,10 +19,11 @@ atracdenc=${2:-$(command -v atracdenc || true)}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Skip the intro to the title screen, and record its music
+# Skip the intro to the title screen, and record its music and pictures
+# without the logo (BG2) and the sprites
 printf '300 -\n2 START\n2700 -\n' > "$work/input.txt"
 "$game" --save "$work/none.sav" --test-input "$work/input.txt" --test-audio "$work/title.wav" \
-    --test-shots "$work" --test-shot-every 60 > /dev/null 2>&1
+    --test-shots "$work" --test-shot-every 60 --test-hide-layers 0x1400 > /dev/null 2>&1
 
 # The intro, without skipping it
 mkdir "$work/intro"
@@ -30,11 +31,8 @@ printf '3600 -\n' > "$work/intro.txt"
 "$game" --save "$work/none.sav" --test-input "$work/intro.txt" \
     --test-shots "$work/intro" --test-shot-every 20 > /dev/null 2>&1
 
-# The background: Rayquaza against the sky near the end of the intro. That's
-# letterboxed to lines 32 to 127, so the sky above and the clouds below are
-# carried on to fill the screen.
-magick "$work/intro/frame_003040.ppm" -crop 240x96+0+32 +repage -filter point -resize 200% \
-    -virtual-pixel Edge -define distort:viewport=480x272+0-40 -distort SRT 0 +repage psp/PIC1.PNG
+# The background: the title screen's Rayquaza when its markings glow brightest
+magick "$work/frame_001920.ppm" -filter point -resize 200% -crop 480x272+0+24 +repage psp/PIC1.PNG
 # The icon: the logo at the end of the intro, which is on black, made clear
 magick "$work/intro/frame_003600.ppm" -fuzz 2% -transparent black -trim +repage \
     -filter Lanczos -resize 144x80 -background none -gravity center -extent 144x80 psp/ICON0.PNG
