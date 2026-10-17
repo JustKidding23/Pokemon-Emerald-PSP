@@ -19,6 +19,9 @@ contain mistakes, so review it before relying on it.
 because pret's decompilation keeps the game's graphics and sound as source files, but what
 you build contains the game, so keep it to yourself and own the game you build.
 
+[CREDITS.md](CREDITS.md) names everyone whose work this is built on: the pret team who
+decompiled the game, and the PC and PS2 ports before this one.
+
 Also by me: [SM64 PSP](https://github.com/JustKidding23/SM64-PSP) and
 [Ocarina of Time PSP](https://github.com/JustKidding23/Ocarina-of-Time-PSP)
 
