@@ -1,0 +1,11 @@
+name: Idea or improvement
+description: Something that would make the game nicer to play on a PSP
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: What you'd like, and why it would help.
+    validations:
+      required: true

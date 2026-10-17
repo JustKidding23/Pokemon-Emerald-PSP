@@ -1,0 +1,54 @@
+name: Something's wrong
+description: A crash, a freeze, or something that looks, sounds or plays wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Please don't attach a ROM, a built game or anything taken
+        from the game.
+  - type: dropdown
+    id: device
+    attributes:
+      label: Where you played
+      options:
+        - PSP 1000
+        - PSP 2000
+        - PSP 3000
+        - PSP Go
+        - PSP Street (E1000)
+        - PPSSPP
+        - Other (say below)
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware
+      description: Like "6.61 PRO-C" or "6.61 ARK-4". For PPSSPP, its version.
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: Which commit you built, or "the latest", and anything you changed.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen
+      description: Where in the game you were and what you did, as exactly as you can.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Photos, screenshots or crash output
+      description: A photo of the screen, or PSPLink's output if you have it.
