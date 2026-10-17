@@ -114,8 +114,15 @@ Build the PSP version with:
 make psp -j$(nproc)
 ```
 
-You should get `build/psp32/PSP/GAME/EMERALD_PSP/EBOOT.PBP`. Copy the `EMERALD_PSP` folder to
-`PSP/GAME/` on the memory stick. The game makes its `saves` folder and `settings.ini` there.
+You should get `build/psp32/PSP/GAME/EMERALD_PSP/` with `EBOOT.PBP` and `kbuttons.prx`, the
+kernel module that reads the music note button. Copy the `EMERALD_PSP` folder to `PSP/GAME/`
+on the memory stick. The game makes its `saves` folder and `settings.ini` there. The game
+itself is also in `build/psp32/pokeemerald.prx`, which PSPLink can start over USB, and
+`pokeemerald32.elf` is the same with its symbols, for looking up crash addresses.
+
+For the icon, background and music the PSP menu shows, run `psp/make_art.sh` before
+`make psp` (see the README). [docs/psp.md](docs/psp.md) has notes on how the port works and
+how to debug it on a PSP.
 
 `make psp PSP_TEST=1 BUILD_DIR=build-test` builds a version for testing in PPSSPP's headless
 emulator. It plays the PSP buttons in `test_input.txt`, from the folder given to
