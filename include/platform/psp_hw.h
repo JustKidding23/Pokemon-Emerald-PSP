@@ -109,5 +109,8 @@ struct PspHwTime
     int year, month, day, dayOfWeek, hour, minute, second;
 };
 void PspHw_GetLocalTime(struct PspHwTime *time);
+// exit.log: a line for each step of quitting (see ExitCallback)
+void PspHw_StartExitLog(const char *path);
+void PspHw_ExitLog(const char *text);
 
 #endif // GUARD_PLATFORM_PSP_HW_H

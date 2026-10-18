@@ -1288,6 +1288,8 @@ int main(int argc, char **argv)
     FindBaseDir(argc > 0 ? argv[0] : NULL);
     snprintf(path, sizeof(path), "%skbuttons.prx", sBaseDir);
     PspHw_StartKernelButtons(path);
+    snprintf(path, sizeof(path), "%sexit.log", sBaseDir);
+    PspHw_StartExitLog(path);
     snprintf(path, sizeof(path), "%ssaves", sBaseDir);
     PspHw_MakeDir(path);
     LoadSettings();

@@ -35,9 +35,51 @@ static unsigned int __attribute__((aligned(64))) sDisplayList[64 * 1024];
 // Where the GU is drawing, as an offset into VRAM
 static void *sDrawBuffer;
 
+// Shared with psp/kbuttons, which writes the buttons here from a kernel thread
+static struct
+{
+    volatile unsigned int run;
+    volatile unsigned int buttons;
+    SceUID gameThread;
+} sKernelButtons;
+
+static char sExitLogPath[256];
+
+// A few lines in exit.log about quitting, to see on the PC how far it got
+void PspHw_ExitLog(const char *text)
+{
+    SceUID fd;
+    char line[96];
+    int length;
+
+    if (sExitLogPath[0] == '\0')
+        return;
+    fd = sceIoOpen(sExitLogPath, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0777);
+    if (fd < 0)
+        return;
+    length = snprintf(line, sizeof(line), "%10u %s\n", (unsigned)(sceKernelGetSystemTimeWide() / 1000), text);
+    sceIoWrite(fd, line, length);
+    sceIoClose(fd);
+}
+
+void PspHw_StartExitLog(const char *path)
+{
+    SceUID fd;
+
+    snprintf(sExitLogPath, sizeof(sExitLogPath), "%s", path);
+    fd = sceIoOpen(sExitLogPath, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+    if (fd >= 0)
+        sceIoClose(fd);
+    PspHw_ExitLog("started");
+}
+
 static int ExitCallback(int arg1, int arg2, void *common)
 {
+    // Stop the note button thread right away, whatever the game's own
+    // thread is doing
+    sKernelButtons.run = 0;
     sRunning = false;
+    PspHw_ExitLog("exit callback");
     return 0;
 }
 
@@ -197,12 +239,6 @@ void PspHw_StartWatchdog(void)
         sceKernelStartThread(thread, 0, NULL);
 }
 
-// Shared with psp/kbuttons, which writes the buttons here from a kernel thread
-static struct
-{
-    volatile unsigned int run;
-    volatile unsigned int buttons;
-} sKernelButtons;
 static bool sKernelButtonsRunning;
 
 bool PspHw_StartKernelButtons(const char *path)
@@ -218,6 +254,7 @@ bool PspHw_StartKernelButtons(const char *path)
     option.mpiddata = PSP_MEMORY_PARTITION_KERNEL;
     option.access = 1;
     sKernelButtons.run = 1;
+    sKernelButtons.gameThread = sceKernelGetThreadId();
     module = sceKernelLoadModule(path, 0, &option);
     if (module < 0 || sceKernelStartModule(module, sizeof(shared), &shared, &status, NULL) < 0 || status < 0)
     {
@@ -236,11 +273,18 @@ bool PspHw_Running(void)
 void PspHw_Exit(void)
 {
     // Stop the kernel thread before the game's memory goes away
+    // Stop the kernel thread. Stopping or unloading its module here would hang
+    // when quitting from the HOME menu: the system holds the module manager
+    // while it waits for the game. It stops the module itself on exit, and
+    // the module's module_stop waits for the thread, in case it's still going.
+    PspHw_ExitLog("main loop ended");
     if (sKernelButtonsRunning)
     {
         sKernelButtons.run = 0;
+        sKernelButtonsRunning = false;
         sceKernelDelayThread(50 * 1000);
     }
+    PspHw_ExitLog("calling sceKernelExitGame");
     sceKernelExitGame();
 }
 
